@@ -1,0 +1,75 @@
+# Build directories
+build/
+build-*/
+cmake-build-*/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+!CMakeLists.txt
+!cmake/*.cmake
+
+# Qt
+*.autosave
+*.qm
+*.user
+*.user.*
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+
+# Compiled files
+*.o
+*.obj
+*.so
+*.so.*
+*.dylib
+*.dll
+*.a
+*.lib
+*.la
+*.lo
+*.slo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.pro.user
+*.pro.user.*
+
+# Testing
+Testing/
+CTestTestfile.cmake
+DartConfiguration.tcl
+
+# Coverage
+*.gcov
+*.gcno
+*.gcda
+coverage/
+*.profdata
+*.profraw
+
+# Documentation
+html/
+latex/
+Doxyfile.bak
+
+# Package files
+*.deb
+*.rpm
+*.tar.gz
+*.zip
+
+# Other
+compile_commands.json
+.cache/
+

@@ -1,0 +1,309 @@
+name: Tests
+run-name: Run status-keycard-qt tests
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+  pull_request:
+    branches:
+      - main
+      - master
+      - develop
+  workflow_dispatch:
+    inputs:
+      qt_version:
+        description: 'Qt version (dependent on docker image)'
+        required: false
+        default: '6.9.2'
+        type: string
+
+jobs:
+  # Fast tests with desktop Qt (lightweight, runs always)
+  test:
+    runs-on: ubuntu-latest
+    name: Run Tests
+    container:
+      image: harbor.status.im/status-im/status-desktop-build:1.0.5-qt6.9.2-android
+      # Run as root to allow installing packages
+    env:
+      QT_VERSION: ${{ inputs.qt_version || '6.9.2' }}
+      QT_HOST: gcc_64
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Clean workspace if retrying job
+        if: ${{ github.run_attempt > 1 }}
+        run: |
+          git reset --hard
+          git clean -xfd
+
+      - name: Setup environment
+        shell: bash
+        run: |
+          set -e
+          
+          # Use Qt desktop (Linux) build instead of Android
+          QT_PATH="/opt/qt/${{ env.QT_VERSION }}/gcc_64"
+          
+          echo "QT_PATH=$QT_PATH" >> $GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=$QT_PATH" >> $GITHUB_ENV
+          echo "Qt6_DIR=$QT_PATH/lib/cmake/Qt6" >> $GITHUB_ENV
+          
+          echo "$QT_PATH/bin" >> $GITHUB_PATH
+          
+          echo "Qt path: $QT_PATH"
+          echo "CMake will look for Qt at: $QT_PATH/lib/cmake/Qt6"
+          
+          # Verify Qt installation
+          if [ -d "$QT_PATH" ]; then
+            echo "✓ Qt directory exists"
+            ls -la "$QT_PATH/bin/" | grep -E "qmake|cmake" || true
+          else
+            echo "✗ Qt directory not found at $QT_PATH"
+            echo "Available Qt installations:"
+            ls -la /opt/qt/${{ env.QT_VERSION }}/ || true
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: |
+          set -e
+          echo "=== Installing development libraries ==="
+          
+          # Install PC/SC and OpenSSL development libraries
+          apt-get update -qq
+          apt-get install -y libpcsclite-dev libssl-dev pkg-config
+          
+          echo ""
+          echo "=== Verifying installations ==="
+          
+          # Check PC/SC headers (can be in /usr/include/PCSC/ or /usr/include/)
+          if [ -f "/usr/include/PCSC/winscard.h" ] || [ -f "/usr/include/winscard.h" ]; then
+            echo "✓ PC/SC headers found"
+            find /usr/include -name "winscard.h" 2>/dev/null || true
+          else
+            echo "✗ PC/SC headers not found"
+            find /usr -name "winscard.h" 2>/dev/null || true
+            exit 1
+          fi
+          
+          # Check PC/SC pkg-config
+          if pkg-config --exists libpcsclite; then
+            echo "✓ PC/SC pkg-config found"
+            pkg-config --modversion libpcsclite
+          else
+            echo "✗ PC/SC pkg-config not found"
+            exit 1
+          fi
+          
+          # Check OpenSSL runtime
+          if command -v openssl >/dev/null 2>&1; then
+            echo "✓ OpenSSL runtime found: $(openssl version)"
+          else
+            echo "✗ OpenSSL runtime not found"
+            exit 1
+          fi
+          
+          # Check OpenSSL development headers
+          if [ -f "/usr/include/openssl/opensslv.h" ]; then
+            echo "✓ OpenSSL development headers found"
+            pkg-config --modversion openssl || echo "  (version detection via pkg-config failed, but headers exist)"
+          else
+            echo "✗ OpenSSL development headers not found"
+            find /usr -name "opensslv.h" 2>/dev/null || echo "  No OpenSSL headers found anywhere"
+            exit 1
+          fi
+
+      - name: Configure and Build
+        run: |
+          set -e
+          mkdir -p build
+          cd build
+          
+          # Use local keycard-qt if path is provided (for act testing)
+          # Otherwise FetchContent will clone from GitHub (for real CI)
+          EXTRA_CMAKE_ARGS=""
+          if [ -n "${KEYCARD_QT_LOCAL_PATH:-}" ]; then
+            echo "Using local keycard-qt from: $KEYCARD_QT_LOCAL_PATH"
+            EXTRA_CMAKE_ARGS="-DKEYCARD_QT_SOURCE_DIR=$KEYCARD_QT_LOCAL_PATH"
+          fi
+          
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="${{ env.QT_PATH }}" \
+            -DQt6_DIR="${{ env.Qt6_DIR }}" \
+            -DBUILD_TESTING=ON \
+            $EXTRA_CMAKE_ARGS
+          
+          cmake --build . -j$(nproc)
+
+      - name: Run tests
+        run: |
+          set -e
+          cd build
+          ctest --output-on-failure --verbose
+
+      - name: Test Summary
+        if: always()
+        run: |
+          if [ -f build/Testing/Temporary/LastTest.log ]; then
+            echo "=== Test Results ==="
+            cat build/Testing/Temporary/LastTest.log
+          fi
+
+  # Android build verification (runs on main/master or manually)
+  android-build:
+    runs-on: ubuntu-latest
+    name: Android Build Verification
+    # Only run on main/master branches or manual dispatch to save CI time
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch'
+    container:
+      image: harbor.status.im/status-im/status-desktop-build:1.0.5-qt6.9.2-android
+      options: --user jenkins
+    env:
+      QT_VERSION: ${{ inputs.qt_version || '6.9.2' }}
+      ANDROID_ABI: arm64-v8a
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Android environment
+        shell: bash
+        run: |
+          set -e
+          
+          # Use Qt Android build
+          QT_ANDROID_PATH="/opt/qt/${{ env.QT_VERSION }}/android_arm64_v8a"
+          QT_HOST_PATH="/opt/qt/${{ env.QT_VERSION }}/gcc_64"
+          
+          echo "QT_ANDROID_PATH=$QT_ANDROID_PATH" >> $GITHUB_ENV
+          echo "QT_HOST_PATH=$QT_HOST_PATH" >> $GITHUB_ENV
+          echo "QT_DIR=$QT_ANDROID_PATH" >> $GITHUB_ENV
+          echo "QTDIR=$QT_ANDROID_PATH" >> $GITHUB_ENV
+          echo "CMAKE_PREFIX_PATH=$QT_ANDROID_PATH" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=/opt/android-sdk/ndk/27.2.12479018" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=/opt/android-sdk" >> $GITHUB_ENV
+          
+          echo "$QT_ANDROID_PATH/bin" >> $GITHUB_PATH
+          echo "$QT_HOST_PATH/bin" >> $GITHUB_PATH
+          
+          echo "Qt Android path: $QT_ANDROID_PATH"
+          echo "Qt Host path: $QT_HOST_PATH"
+          
+          # Verify Qt installations
+          if [ -d "$QT_ANDROID_PATH" ]; then
+            echo "✓ Qt Android directory exists"
+          else
+            echo "✗ Qt Android directory not found at $QT_ANDROID_PATH"
+            exit 1
+          fi
+          
+          if [ -d "$QT_HOST_PATH" ]; then
+            echo "✓ Qt Host directory exists"
+          else
+            echo "✗ Qt Host directory not found at $QT_HOST_PATH"
+            exit 1
+          fi
+
+      - name: Verify OpenSSL
+        run: |
+          set -e
+          
+          echo "=== Verifying OpenSSL for Android build ==="
+          
+          # OpenSSL location from Docker build (see mobile/docker/Dockerfile:278)
+          OPENSSL_DIR="/home/jenkins/openssl-output/${ANDROID_ABI}"
+          
+          if [ ! -d "$OPENSSL_DIR" ]; then
+            echo "✗ OpenSSL not found at: $OPENSSL_DIR"
+            echo ""
+            echo "Expected location based on Dockerfile:"
+            echo "  - Build command: ./Configure android-arm64 --prefix=/home/jenkins/openssl-output/arm64-v8a"
+            echo "  - Directory should exist: $OPENSSL_DIR"
+            echo ""
+            ls -la /home/jenkins/openssl-output/ 2>/dev/null || echo "openssl-output directory doesn't exist"
+            exit 1
+          fi
+          
+          if [ ! -f "$OPENSSL_DIR/lib/libcrypto.a" ]; then
+            echo "✗ OpenSSL library not found at: $OPENSSL_DIR/lib/libcrypto.a"
+            ls -la "$OPENSSL_DIR/lib/" 2>/dev/null || echo "lib directory doesn't exist"
+            exit 1
+          fi
+          
+          if [ ! -d "$OPENSSL_DIR/include/openssl" ]; then
+            echo "✗ OpenSSL headers not found at: $OPENSSL_DIR/include/openssl"
+            ls -la "$OPENSSL_DIR/include/" 2>/dev/null || echo "include directory doesn't exist"
+            exit 1
+          fi
+          
+          echo "✓ OpenSSL found at: $OPENSSL_DIR"
+          echo "  Library: $(ls -lh $OPENSSL_DIR/lib/libcrypto.a | awk '{print $5}')"
+          echo "  Headers: $(ls $OPENSSL_DIR/include/openssl/*.h | wc -l) header files"
+
+      - name: Configure and Build for Android
+        run: |
+          set -e
+          mkdir -p build-android
+          cd build-android
+          
+          # OpenSSL location from Docker build
+          OPENSSL_DIR="/home/jenkins/openssl-output/${ANDROID_ABI}"
+          
+          # Use local keycard-qt if path is provided (for act testing)
+          EXTRA_CMAKE_ARGS=""
+          if [ -n "${KEYCARD_QT_LOCAL_PATH:-}" ]; then
+            echo "Using local keycard-qt from: $KEYCARD_QT_LOCAL_PATH"
+            EXTRA_CMAKE_ARGS="-DKEYCARD_QT_SOURCE_DIR=$KEYCARD_QT_LOCAL_PATH"
+          fi
+          
+          echo "Configuring for Android ${ANDROID_ABI}..."
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_SYSTEM_NAME=Android \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=${{ env.ANDROID_ABI }} \
+            -DANDROID_PLATFORM=android-26 \
+            -DQT_HOST_PATH="${{ env.QT_HOST_PATH }}" \
+            -DCMAKE_PREFIX_PATH="${{ env.QT_ANDROID_PATH }}" \
+            -DCMAKE_FIND_ROOT_PATH="${{ env.QT_ANDROID_PATH }}" \
+            -DQt6_DIR="${{ env.QT_ANDROID_PATH }}/lib/cmake/Qt6" \
+            -DQt6CoreTools_DIR="${{ env.QT_HOST_PATH }}/lib/cmake/Qt6CoreTools" \
+            -DBUILD_TESTING=OFF \
+            -DOPENSSL_CRYPTO_LIBRARY="${OPENSSL_DIR}/lib/libcrypto.a" \
+            -DOPENSSL_BUILD_INCLUDE_DIR="${OPENSSL_DIR}/include" \
+            -DOPENSSL_SOURCE_INCLUDE_DIR="${OPENSSL_DIR}/include" \
+            $EXTRA_CMAKE_ARGS
+          
+          echo "Building..."
+          cmake --build . -j$(nproc)
+
+      - name: Verify Android artifacts
+        run: |
+          set -e
+          
+          echo "=== Checking for Android artifacts ==="
+          
+          # Check for library
+          if [ -f "build-android/libstatus-keycard-qt.so" ] || [ -f "build-android/libstatus-keycard-qt.a" ]; then
+            echo "✓ Android library built successfully"
+            ls -lh build-android/libstatus-keycard-qt.*
+          else
+            echo "⚠ Android library not found (may be in subdirectory)"
+            find build-android -name "libstatus-keycard-qt.*" || true
+          fi
+      
+
+
