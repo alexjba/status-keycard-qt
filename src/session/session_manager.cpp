@@ -21,6 +21,14 @@
 
 namespace StatusKeycard {
 
+// Derivation paths matching status-keycard-go/internal/const.go
+static const QString PATH_MASTER = "m";
+static const QString PATH_WALLET_ROOT = "m/44'/60'/0'/0";
+static const QString PATH_WALLET = "m/44'/60'/0'/0/0";
+static const QString PATH_EIP1581 = "m/43'/60'/1581'";
+static const QString PATH_WHISPER = "m/43'/60'/1581'/0'/0";
+static const QString PATH_ENCRYPTION = "m/43'/60'/1581'/1'/0";
+
 SessionManager::SessionManager(QObject* parent)
     : QObject(parent)
     , m_state(SessionState::UnknownReaderState)
@@ -93,10 +101,17 @@ bool SessionManager::start(const QString& storagePath, bool logEnabled, const QS
     qDebug() << "SessionManager: Main thread:" << mainThread;
     qDebug() << "SessionManager: Same thread?" << (m_channel->thread() == mainThread);
     
-    m_commandSet = std::make_unique<Keycard::CommandSet>(m_channel.get());
+    // CRITICAL: DO NOT create CommandSet here!
+    // Unlike the channel (which monitors readers), CommandSet represents a connection
+    // to a specific card. It must ONLY be created when a card is actually present.
+    // This matches status-keycard-go behavior where cmdSet is created in connectCard(),
+    // not in NewKeycardContextV2().
+    // m_commandSet will be created in openSecureChannel() when card is detected.
     
     // Connect signals
     qDebug() << "SessionManager: Connecting signals...";
+    connect(m_channel.get(), &Keycard::KeycardChannel::readerAvailabilityChanged,
+            this, &SessionManager::onReaderAvailabilityChanged);
     connect(m_channel.get(), &Keycard::KeycardChannel::targetDetected,
             this, &SessionManager::onCardDetected);
     connect(m_channel.get(), &Keycard::KeycardChannel::targetLost,
@@ -113,7 +128,10 @@ bool SessionManager::start(const QString& storagePath, bool logEnabled, const QS
     m_channel->startDetection();
     
     m_started = true;
-    setState(SessionState::WaitingForCard);
+    // Don't set state here - wait for readerAvailabilityChanged signal
+    // The backend will report reader status, and we'll transition accordingly:
+    // - No readers → WaitingForReader
+    // - Readers present → WaitingForCard
     
     // CRITICAL: Start timer in the object's thread using QMetaObject::invokeMethod
     // This ensures the timer starts in the main thread even if start() is called from background
@@ -159,17 +177,51 @@ void SessionManager::setState(SessionState newState)
     SessionState oldState = m_state;
     m_state = newState;
     
-    qDebug() << "SessionManager: State" << sessionStateToString(oldState)
+    qDebug() << "🔄 SessionManager: STATE CHANGE:" << sessionStateToString(oldState)
              << "->" << sessionStateToString(newState);
+    qDebug() << "🔄   Thread:" << QThread::currentThread();
     
     // Emit Qt signal - c_api.cpp will forward to SignalManager
     emit stateChanged(newState, oldState);
 }
 
+void SessionManager::onReaderAvailabilityChanged(bool available)
+{
+    qDebug() << "SessionManager: Reader availability changed:" << (available ? "available" : "not available");
+    
+    if (available) {
+        // Readers are present - reset any stale connection before transitioning
+        // This matches Go's connectCard() line 247: kc.resetCardConnection()
+        // Go ALWAYS resets the card connection when readers exist, ensuring clean state
+        if (m_commandSet || m_channel->isConnected()) {
+            qDebug() << "SessionManager: Clearing stale card connection (reader availability changed)";
+            closeSecureChannel();
+        }
+        
+        // Transition to WaitingForCard
+        // This matches Go's connectCard() line 252: kc.status.Reset(WaitingForCard)
+        if (m_state == SessionState::UnknownReaderState || m_state == SessionState::WaitingForReader) {
+            setState(SessionState::WaitingForCard);
+        }
+    } else {
+        // No readers present - clear any connection and transition to WaitingForReader
+        // This matches Go's connectCard() line 242: kc.status.Reset(WaitingForReader)
+        if (m_commandSet || m_channel->isConnected()) {
+            qDebug() << "SessionManager: Clearing card connection (no readers)";
+            closeSecureChannel();
+        }
+        
+        if (m_state == SessionState::UnknownReaderState || m_state == SessionState::WaitingForCard) {
+            setState(SessionState::WaitingForReader);
+        }
+    }
+}
+
 void SessionManager::onCardDetected(const QString& uid)
 {
     qDebug() << "========================================";
-    qDebug() << "SessionManager: CARD DETECTED! UID:" << uid;
+    qDebug() << "🎴 SessionManager: CARD DETECTED! UID:" << uid;
+    qDebug() << "🎴   Thread:" << QThread::currentThread();
     qDebug() << "========================================";
     m_currentCardUID = uid;
     
@@ -184,7 +236,13 @@ void SessionManager::onCardDetected(const QString& uid)
         return;
     }
     
-    setState(SessionState::Ready);
+    // Check if card is initialized
+    if (!m_appInfo.initialized) {
+        qDebug() << "SessionManager: Card is empty (not initialized)";
+        setState(SessionState::EmptyKeycard);
+    } else {
+        setState(SessionState::Ready);
+    }
 }
 
 void SessionManager::onCardRemoved()
@@ -218,13 +276,28 @@ void SessionManager::checkCardState()
 
 bool SessionManager::openSecureChannel()
 {
+    // CRITICAL: Serialize card operations to prevent concurrent APDU corruption
+    QMutexLocker locker(&m_operationMutex);
+    
+    // CRITICAL FIX: Always recreate CommandSet before opening secure channel
+    // This ensures fresh SecureChannel state regardless of:
+    // 1. Card inserted after startup (CommandSet sat idle)
+    // 2. Card removed and reinserted (stale session state)
+    // 3. Previous failed attempts (corrupted state)
+    if (m_channel) {
+        qDebug() << "SessionManager: Creating fresh CommandSet for new secure channel session";
+        m_commandSet = std::make_unique<Keycard::CommandSet>(m_channel.get());
+    }
+    
     if (!m_commandSet) {
+        qWarning() << "SessionManager: No command set available";
         return false;
     }
     
     // Select applet
     m_appInfo = m_commandSet->select();
-    if (m_appInfo.instanceUID.isEmpty()) {
+    // Check if select succeeded: initialized cards have instanceUID, pre-initialized cards have secureChannelPublicKey
+    if (m_appInfo.instanceUID.isEmpty() && m_appInfo.secureChannelPublicKey.isEmpty()) {
         qWarning() << "SessionManager: Failed to select applet";
         return false;
     }
@@ -239,14 +312,14 @@ bool SessionManager::openSecureChannel()
     // Check if card needs initialization
     if (!m_appInfo.initialized) {
         qWarning() << "========================================";
-        qWarning() << "❌ SessionManager: CARD NOT INITIALIZED!";
-        qWarning() << "❌ Card must be initialized before it can be used";
+        qWarning() << "⚠️  SessionManager: CARD NOT INITIALIZED";
+        qWarning() << "⚠️  Card detected but needs initialization before use";
         qWarning() << "========================================";
+        qWarning() << "💡 Use Init flow to initialize the card";
         qWarning() << "💡 Call KeycardInitialize.init(PIN, PUK, PairingPassword)";
-        qWarning() << "💡 Example: init('000000', '000000000000', 'YourPairingPassword')";
         qWarning() << "========================================";
-        m_lastError = "Card not initialized";
-        return false;
+        // Return true to allow Init flow to proceed - this is not an error
+        return true;
     }
     
     // Try to load saved pairing
@@ -287,13 +360,65 @@ bool SessionManager::openSecureChannel()
     }
     
     qDebug() << "SessionManager: Secure channel opened";
+    
+    // CRITICAL: Initialize card state after opening secure channel
+    // This matches status-keycard-go's connectKeycard() flow (line 420-437)
+    // The card expects a GET_STATUS command after opening secure channel to properly
+    // initialize internal state. Without this, subsequent commands like VERIFY_PIN
+    // may fail with unexpected errors (0x6F05, 0x6985, etc.)
+    qDebug() << "SessionManager: Fetching application status to initialize card state";
+    m_appStatus = m_commandSet->getStatus(Keycard::APDU::P1GetStatusApplication);
+    if (m_appStatus.pinRetryCount < 0) {
+        qWarning() << "SessionManager: Failed to get application status:" << m_commandSet->lastError();
+        qWarning() << "SessionManager: Continuing anyway, but card operations may fail";
+        // Don't return false - this is initialization, not critical
+    } else {
+        qDebug() << "SessionManager: Application status fetched successfully";
+        qDebug() << "  PIN retry count:" << m_appStatus.pinRetryCount;
+        qDebug() << "  PUK retry count:" << m_appStatus.pukRetryCount;
+        qDebug() << "  Key initialized:" << m_appStatus.keyInitialized;
+    }
+    
+    // Fetch metadata proactively (matches status-keycard-go line 432: updateMetadata())
+    // Metadata contains wallet account addresses, names, and derivation paths
+    // This is done during connection so the app has account info available immediately
+    qDebug() << "SessionManager: Fetching metadata from card";
+    try {
+        Metadata metadata = getMetadata();
+        if (!metadata.wallets.isEmpty()) {
+            qDebug() << "SessionManager: Loaded metadata with" << metadata.wallets.size() << "wallet(s)";
+            qDebug() << "  Name:" << metadata.name;
+            for (const auto& wallet : metadata.wallets) {
+                qDebug() << "    Wallet address:" << wallet.address;
+            }
+        } else {
+            qDebug() << "SessionManager: No metadata found on card (empty or not set)";
+        }
+    } catch (...) {
+        qWarning() << "SessionManager: Failed to fetch metadata, continuing anyway";
+        // Don't fail connection if metadata fetch fails - it's not critical
+        // Metadata can be fetched later on-demand
+    }
+    
+    // CRITICAL: Clear any error from metadata fetch
+    // getMetadata() may set an error if called before state transition completes,
+    // but we don't want that error to affect subsequent operations
+    m_lastError.clear();
+    
     return true;
 }
 
 void SessionManager::closeSecureChannel()
 {
-    // Secure channel automatically closes when card is removed
+    // CRITICAL: Destroy CommandSet when card is removed
+    // This matches status-keycard-go's resetCardConnection() which sets cmdSet = nil
+    // CommandSet should ONLY exist when a card is present
+    m_commandSet.reset();
+    
+    // Clear pairing info
     m_pairingInfo = Keycard::PairingInfo();
+    
+    qDebug() << "SessionManager: Secure channel closed, CommandSet destroyed";
 }
 
 bool SessionManager::savePairing(const QString& instanceUID, const Keycard::PairingInfo& pairingInfo)
@@ -360,17 +485,16 @@ SessionManager::Status SessionManager::getStatus() const
     }
     
     // Build keycardStatus (if we're in Ready or Authorized state)
-    if (m_state == SessionState::Ready || m_state == SessionState::Authorized) {
-        try {
-            auto appStatus = m_commandSet->getStatus();
-            status.keycardStatus = new ApplicationStatus();
-            status.keycardStatus->remainingAttemptsPIN = appStatus.pinRetryCount;
-            status.keycardStatus->remainingAttemptsPUK = appStatus.pukRetryCount;
-            status.keycardStatus->keyInitialized = appStatus.keyInitialized;
-            status.keycardStatus->path = ""; // TODO: Get from card if available
-        } catch (...) {
-            // Ignore errors, keep null
-        }
+    // CRITICAL: Use cached m_appStatus instead of calling m_commandSet->getStatus() again
+    // Calling getStatus() here without m_operationMutex can cause race conditions with
+    // other operations (like authorize()) that run on worker threads, resulting in 0x6f05 errors.
+    // The Go implementation also caches status - see keycard_context_v2.go:427-430
+    if ((m_state == SessionState::Ready || m_state == SessionState::Authorized) && m_appStatus.pinRetryCount >= 0) {
+        status.keycardStatus = new ApplicationStatus();
+        status.keycardStatus->remainingAttemptsPIN = m_appStatus.pinRetryCount;
+        status.keycardStatus->remainingAttemptsPUK = m_appStatus.pukRetryCount;
+        status.keycardStatus->keyInitialized = m_appStatus.keyInitialized;
+        status.keycardStatus->path = ""; // TODO: Get from card if available
     }
     
     // Build metadata (if we have it)
@@ -383,8 +507,13 @@ SessionManager::Status SessionManager::getStatus() const
 
 bool SessionManager::initialize(const QString& pin, const QString& puk, const QString& pairingPassword)
 {
-    if (m_state != SessionState::Ready) {
-        setError("Card not ready (current state: " + currentStateString() + ")");
+    if (m_state != SessionState::Ready && m_state != SessionState::EmptyKeycard) {
+        setError("Card not ready for initialization (current state: " + currentStateString() + ")");
+        return false;
+    }
+    
+    if (!m_commandSet) {
+        setError("No command set available (no card connected)");
         return false;
     }
     
@@ -397,14 +526,47 @@ bool SessionManager::initialize(const QString& pin, const QString& puk, const QS
         return false;
     }
     
-    qDebug() << "SessionManager: Card initialized";
+    qDebug() << "SessionManager: Card initialized successfully";
+    
+    // After initialization, card has new credentials (PIN, PUK, pairing)
+    // Current connection is no longer valid - must reset and re-detect card
+    // This matches status-keycard-go: resetCardConnection() + forceScan()
+    qDebug() << "SessionManager: Resetting connection to establish pairing and secure channel";
+    
+    closeSecureChannel();
+    
+    // Force card re-detection (matches status-keycard-go forceScan())
+    // This will trigger the PC/SC detection loop to re-detect the card:
+    // 1. Exit watchCardRemoval() phase
+    // 2. Return to detection phase
+    // 3. Re-detect card and emit targetDetected signal
+    // 4. onCardDetected() will be called automatically
+    // 5. New CommandSet created, applet selected (now shows initialized)
+    // 6. Pair with new credentials and open secure channel
+    // 7. Transition to Ready state
+    // 8. Emit status change signal (unblocks UI)
+    qDebug() << "SessionManager: Forcing card re-scan";
+    m_channel->forceScan();
+    
     return true;
 }
 
 bool SessionManager::authorize(const QString& pin)
 {
+    qDebug() << "📱 SessionManager::authorize() - START - Thread:" << QThread::currentThread();
+    qDebug() << "📱   PIN length:" << pin.length();
+    
+    // CRITICAL: Serialize card operations to prevent concurrent APDU corruption
+    QMutexLocker locker(&m_operationMutex);
+    qDebug() << "📱   Mutex acquired";
+    
     if (m_state != SessionState::Ready) {
         setError("Card not ready (current state: " + currentStateString() + ")");
+        return false;
+    }
+    
+    if (!m_commandSet) {
+        setError("No command set available (no card connected)");
         return false;
     }
     
@@ -421,6 +583,7 @@ bool SessionManager::authorize(const QString& pin)
     m_authorized = true;
     setState(SessionState::Authorized);
     qDebug() << "SessionManager: Authorized";
+    qDebug() << "📱 SessionManager::authorize() - END - Success";
     return true;
 }
 
@@ -572,11 +735,31 @@ bool SessionManager::factoryReset()
         return false;
     }
     
-    // After factory reset, we're back to Ready state
-    m_authorized = false;
-    setState(SessionState::Ready);
-    
     qDebug() << "SessionManager: Factory reset complete";
+    
+    // After factory reset, card is back to pre-initialized state:
+    // - No keys (KeyUID should be empty)
+    // - No pairing (old pairing is invalid)
+    // - initialized flag is false
+    // Current connection uses old pairing and must be reset
+    
+    qDebug() << "SessionManager: Resetting connection to re-detect factory-reset card";
+    
+    closeSecureChannel();
+    
+    // Force card re-detection (matches status-keycard-go forceScan())
+    // This will:
+    // 1. Exit watchCardRemoval() phase
+    // 2. Return to detection phase  
+    // 3. Re-detect card and emit targetDetected signal
+    // 4. onCardDetected() will be called automatically
+    // 5. New CommandSet created, applet selected (now shows pre-initialized)
+    // 6. Attempt to pair (will fail - no pairing on pre-initialized card)
+    // 7. Transition to EmptyKeycard state
+    // 8. Emit status change signal (unblocks UI)
+    qDebug() << "SessionManager: Forcing card re-scan";
+    m_channel->forceScan();
+    
     return true;
 }
 
@@ -585,14 +768,6 @@ bool SessionManager::factoryReset()
 // to avoid forward declaration errors
 
 // Key Export
-
-// Paths matching status-keycard-go/internal/const.go
-static const QString PATH_MASTER = "m";
-static const QString PATH_WALLET_ROOT = "m/44'/60'/0'/0";
-static const QString PATH_WALLET = "m/44'/60'/0'/0/0";
-static const QString PATH_EIP1581 = "m/43'/60'/1581'";
-static const QString PATH_WHISPER = "m/43'/60'/1581'/0'/0";
-static const QString PATH_ENCRYPTION = "m/43'/60'/1581'/1'/0";
 
 // BER-TLV parser for exported keys (matching keycard-go implementation)
 static quint32 parseTlvLength(const QByteArray& data, int& offset) {
@@ -802,6 +977,9 @@ SessionManager::LoginKeys SessionManager::exportLoginKeys()
     // Serialize card operations to prevent concurrent APDU corruption
     QMutexLocker locker(&m_operationMutex);
     
+    // Clear any previous error
+    m_lastError.clear();
+    
     LoginKeys keys;
     
     if (m_state != SessionState::Authorized) {
@@ -817,8 +995,12 @@ SessionManager::LoginKeys SessionManager::exportLoginKeys()
     qDebug() << "SessionManager: Exporting login keys";
     
     // Export whisper private key
+    // CRITICAL: Use makeCurrent=true for the FIRST export after opening secure channel!
+    // The keycard has an internal "current key" pointer that must be set before derivation.
+    // After opening a secure channel, this pointer is unset. The first exportKey call
+    // with makeCurrent=true will set it, allowing subsequent exports to work.
     qDebug() << "SessionManager: Exporting whisper key from path:" << PATH_WHISPER;
-    QByteArray whisperData = m_commandSet->exportKey(true, false, PATH_WHISPER, Keycard::APDU::P2ExportKeyPrivateAndPublic);
+    QByteArray whisperData = m_commandSet->exportKey(true, true, PATH_WHISPER, Keycard::APDU::P2ExportKeyPrivateAndPublic);
     if (whisperData.isEmpty()) {
         setError(QString("Failed to export whisper key: %1").arg(m_commandSet->lastError()));
         return keys;
@@ -827,6 +1009,7 @@ SessionManager::LoginKeys SessionManager::exportLoginKeys()
     keys.whisperPrivateKey = parseExportedKey(whisperData);
 
     // Export encryption private key
+    // Now we can use makeCurrent=false since the whisper export already set the card state
     qDebug() << "SessionManager: Exporting encryption key from path:" << PATH_ENCRYPTION;
     QByteArray encryptionData = m_commandSet->exportKey(true, false, PATH_ENCRYPTION, Keycard::APDU::P2ExportKeyPrivateAndPublic);
     if (encryptionData.isEmpty()) {
@@ -842,6 +1025,12 @@ SessionManager::LoginKeys SessionManager::exportLoginKeys()
 
 SessionManager::RecoverKeys SessionManager::exportRecoverKeys()
 {
+    // CRITICAL: Serialize card operations to prevent concurrent APDU corruption
+    QMutexLocker locker(&m_operationMutex);
+    
+    // Clear any previous error
+    m_lastError.clear();
+    
     RecoverKeys keys;
     
     if (m_state != SessionState::Authorized) {

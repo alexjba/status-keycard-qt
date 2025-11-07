@@ -22,6 +22,7 @@ public:
     void setCallback(SignalCallback callback);
     void emitStatusChanged(const SessionManager::Status& status);
     void emitError(const QString& error);
+    void emitSignal(const QString& jsonSignal);
 
 private:
     SignalManager();

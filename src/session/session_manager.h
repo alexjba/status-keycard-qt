@@ -135,6 +135,7 @@ signals:
     void error(const QString& message);
 
 private slots:
+    void onReaderAvailabilityChanged(bool available);
     void onCardDetected(const QString& uid);
     void onCardRemoved();
     void onChannelError(const QString& error);
@@ -158,6 +159,7 @@ private:
     std::unique_ptr<Keycard::KeycardChannel> m_channel;
     std::unique_ptr<Keycard::CommandSet> m_commandSet;
     Keycard::ApplicationInfo m_appInfo;
+    Keycard::ApplicationStatus m_appStatus;  // Cached status to avoid redundant GET_STATUS calls
     Keycard::PairingInfo m_pairingInfo;
     
     // Monitoring
@@ -166,7 +168,8 @@ private:
     bool m_authorized;
     
     // Thread safety - protects all card operations
-    mutable QMutex m_operationMutex;
+    // MUST be recursive to allow exportRecoverKeys() to call exportLoginKeys()
+    mutable QRecursiveMutex m_operationMutex;
 };
 
 } // namespace StatusKeycard

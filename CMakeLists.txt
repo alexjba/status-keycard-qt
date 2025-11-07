@@ -15,7 +15,7 @@ set(STATUS_KEYCARD_BUILD_TESTING ${BUILD_TESTING})  # Save status-keycard-qt tes
 set(STATUS_KEYCARD_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})  # Save status-keycard-qt library type preference
 
 # Find dependencies
-find_package(Qt6 REQUIRED COMPONENTS Core Nfc)
+find_package(Qt6 REQUIRED COMPONENTS Core Nfc Concurrent)
 
 # OpenSSL is REQUIRED for key derivation (secp256k1 public key derivation)
 # For Android and iOS, we use manually provided paths instead of find_package
@@ -106,6 +106,23 @@ set(SOURCES
     src/storage/pairing_storage.cpp
     src/signal_manager.cpp
     src/rpc/rpc_service.cpp
+    # Flow API
+    src/flow/flow_signals.cpp
+    src/flow/flow_state_machine.cpp
+    src/flow/flow_manager.cpp
+    src/flow/flows/flow_base.cpp
+    # Flow implementations
+    src/flow/flows/login_flow.cpp
+    src/flow/flows/get_app_info_flow.cpp
+    src/flow/flows/recover_account_flow.cpp
+    src/flow/flows/load_account_flow.cpp
+    src/flow/flows/sign_flow.cpp
+    src/flow/flows/change_pin_flow.cpp
+    src/flow/flows/change_puk_flow.cpp
+    src/flow/flows/change_pairing_flow.cpp
+    src/flow/flows/export_public_flow.cpp
+    src/flow/flows/get_metadata_flow.cpp
+    src/flow/flows/store_metadata_flow.cpp
 )
 
 # Add Android-specific JNI bridge
@@ -129,6 +146,7 @@ target_link_libraries(status-keycard-qt
     PUBLIC
         Qt6::Core
         Qt6::Nfc
+        Qt6::Concurrent
     PRIVATE
         keycard-qt  # Linked privately so it's absorbed into libstatus-keycard-qt
 )

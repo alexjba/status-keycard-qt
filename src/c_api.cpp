@@ -2,9 +2,12 @@
 #include "rpc/rpc_service.h"
 #include "session/session_manager.h"
 #include "signal_manager.h"
+#include "flow/flow_manager.h"
 #include <QCoreApplication>
 #include <QString>
 #include <QObject>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <memory>
 #include <cstring>
 
@@ -43,6 +46,20 @@ struct StatusKeycardContextImpl {
             // Emit status-changed signal
             auto status = rpcService->sessionManager()->getStatus();
             signalManager->emitStatusChanged(status);
+        });
+        
+        // Connect FlowManager signals to SignalManager
+        QObject::connect(StatusKeycard::FlowManager::instance(), &StatusKeycard::FlowManager::flowSignal,
+                        [this](const QString& type, const QJsonObject& event) {
+            // Build signal JSON
+            QJsonObject signal;
+            signal["type"] = type;
+            signal["event"] = event;
+            
+            QJsonDocument doc(signal);
+            QString jsonString = QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
+            
+            signalManager->emitSignal(jsonString);
         });
         
 #ifdef Q_OS_ANDROID
@@ -175,36 +192,107 @@ void ResetAPIWithContext(StatusKeycardContext ctx) {
 // ============================================================================
 
 char* KeycardInitFlowWithContext(StatusKeycardContext ctx, const char* storageDir) {
-    // Flow API is deprecated in favor of Session API
-    // Return success for now
-    (void)ctx;
-    (void)storageDir;
-    const char* success = R"({"success": true, "message": "Flow API deprecated, use Session API"})";
-    return strdup(success);
+    if (!ctx || !storageDir) {
+        const char* error = R"({"success": false, "error": "Invalid parameters"})";
+        return strdup(error);
+    }
+    
+    // Initialize FlowManager with storage directory
+    bool success = StatusKeycard::FlowManager::instance()->init(QString::fromUtf8(storageDir));
+    
+    if (!success) {
+        const char* error = R"({"success": false, "error": "Failed to initialize FlowManager"})";
+        return strdup(error);
+    }
+    
+    // Start continuous card detection (matching status-keycard-go behavior)
+    // Detection runs continuously until app shutdown, NOT per-flow
+    qDebug() << "C API: Starting continuous card detection...";
+    StatusKeycard::FlowManager::instance()->startContinuousDetection();
+    qDebug() << "C API: Continuous detection started";
+    
+    const char* response = R"({"success": true})";
+    return strdup(response);
 }
 
 char* KeycardStartFlowWithContext(StatusKeycardContext ctx, int flowType, const char* jsonParams) {
-    // Flow API is deprecated in favor of Session API
-    (void)ctx;
-    (void)flowType;
-    (void)jsonParams;
-    const char* error = R"({"success": false, "error": "Flow API deprecated, use Session API"})";
-    return strdup(error);
+    if (!ctx) {
+        const char* error = R"({"success": false, "error": "Invalid context"})";
+        return strdup(error);
+    }
+    
+    // Parse JSON parameters
+    QJsonObject params;
+    if (jsonParams && strlen(jsonParams) > 0) {
+        QJsonDocument doc = QJsonDocument::fromJson(QByteArray(jsonParams));
+        if (doc.isObject()) {
+            params = doc.object();
+        }
+    }
+    
+    // Start flow
+    bool success = StatusKeycard::FlowManager::instance()->startFlow(flowType, params);
+    
+    if (success) {
+        const char* response = R"({"success": true})";
+        return strdup(response);
+    } else {
+        QString error = StatusKeycard::FlowManager::instance()->lastError();
+        QJsonObject errorObj;
+        errorObj["success"] = false;
+        errorObj["error"] = error;
+        QByteArray json = QJsonDocument(errorObj).toJson(QJsonDocument::Compact);
+        return strdup(json.constData());
+    }
 }
 
 char* KeycardResumeFlowWithContext(StatusKeycardContext ctx, const char* jsonParams) {
-    // Flow API is deprecated in favor of Session API
-    (void)ctx;
-    (void)jsonParams;
-    const char* error = R"({"success": false, "error": "Flow API deprecated, use Session API"})";
-    return strdup(error);
+    if (!ctx) {
+        const char* error = R"({"success": false, "error": "Invalid context"})";
+        return strdup(error);
+    }
+    
+    // Parse JSON parameters
+    QJsonObject params;
+    if (jsonParams && strlen(jsonParams) > 0) {
+        QJsonDocument doc = QJsonDocument::fromJson(QByteArray(jsonParams));
+        if (doc.isObject()) {
+            params = doc.object();
+        }
+    }
+    
+    // Resume flow
+    bool success = StatusKeycard::FlowManager::instance()->resumeFlow(params);
+    
+    if (success) {
+        const char* response = R"({"success": true})";
+        return strdup(response);
+    } else {
+        QString error = StatusKeycard::FlowManager::instance()->lastError();
+        QJsonObject errorObj;
+        errorObj["success"] = false;
+        errorObj["error"] = error;
+        QByteArray json = QJsonDocument(errorObj).toJson(QJsonDocument::Compact);
+        return strdup(json.constData());
+    }
 }
 
 char* KeycardCancelFlowWithContext(StatusKeycardContext ctx) {
-    // Flow API is deprecated in favor of Session API
-    (void)ctx;
-    const char* success = R"({"success": true, "message": "Flow API deprecated"})";
-    return strdup(success);
+    if (!ctx) {
+        const char* error = R"({"success": false, "error": "Invalid context"})";
+        return strdup(error);
+    }
+    
+    // Cancel flow
+    bool success = StatusKeycard::FlowManager::instance()->cancelFlow();
+    
+    if (success) {
+        const char* response = R"({"success": true})";
+        return strdup(response);
+    } else {
+        const char* error = R"({"success": false, "error": "Failed to cancel flow"})";
+        return strdup(error);
+    }
 }
 
 // ============================================================================

@@ -109,6 +109,11 @@ void SignalManager::emitError(const QString& error)
     sendSignal(jsonString);
 }
 
+void SignalManager::emitSignal(const QString& jsonSignal)
+{
+    sendSignal(jsonSignal);
+}
+
 void SignalManager::sendSignal(const QString& jsonSignal)
 {
     if (!m_callback) {

@@ -2,6 +2,9 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include "status-keycard-qt/status_keycard.h"
+#include "flow/flow_manager.h"
+
+using namespace StatusKeycard;
 
 class TestCApi : public QObject
 {
@@ -241,17 +244,17 @@ void TestCApi::testSetSignalEventCallbackNull()
 
 void TestCApi::testFlowAPIReturnsDeprecated()
 {
-    // Flow API uses global context, not the context parameter
+    // Flow API uses global context - test that the wrapper functions work
     char* response = KeycardInitFlow("/tmp/test");
     QVERIFY(response != nullptr);
     
-    // Should contain deprecation message
+    // Should be valid JSON response (success or error, not a crash)
     QString responseStr = QString::fromUtf8(response);
-    QVERIFY(responseStr.contains("deprecated") || responseStr.contains("Deprecated"));
+    QVERIFY(responseStr.contains("success") || responseStr.contains("error") || responseStr.contains("result"));
     
     Free(response);
     
-    // Test other Flow API methods
+    // Test other Flow API methods - they should not crash
     response = KeycardStartFlow(0, "{}");
     QVERIFY(response != nullptr);
     Free(response);
@@ -263,6 +266,9 @@ void TestCApi::testFlowAPIReturnsDeprecated()
     response = KeycardCancelFlow();
     QVERIFY(response != nullptr);
     Free(response);
+    
+    // Cleanup
+    FlowManager::destroyInstance();
 }
 
 void TestCApi::testMockedFunctionsReturnSuccess()
