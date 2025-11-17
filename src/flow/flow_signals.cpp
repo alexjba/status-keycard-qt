@@ -47,7 +47,7 @@ void FlowSignals::emitFlowResult(const QJsonObject& result)
 void FlowSignals::emitInsertCard()
 {
     QJsonObject event;
-    event[FlowParams::ERROR_KEY] = "connection";
+    event[FlowParams::ERROR_KEY] = "connection-error";
     QJsonObject signal = buildSignal(INSERT_CARD, event);
     emitSignal(signal);
 }

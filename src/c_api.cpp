@@ -6,6 +6,7 @@
 #include <QCoreApplication>
 #include <QString>
 #include <QObject>
+#include <QThread>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <memory>
@@ -230,8 +231,23 @@ char* KeycardStartFlowWithContext(StatusKeycardContext ctx, int flowType, const 
         }
     }
     
-    // Start flow
-    bool success = StatusKeycard::FlowManager::instance()->startFlow(flowType, params);
+    // IMPORTANT: Marshal to Qt main thread!
+    // This function is called from Nim threads, but startFlow() creates Qt objects
+    // and manipulates state that must be on the Qt main thread.
+    bool success = false;
+    
+    // Check if we're already on the Qt main thread
+    auto flowManager = StatusKeycard::FlowManager::instance();
+    if (QThread::currentThread() == flowManager->thread()) {
+        // Already on Qt thread - call directly to avoid deadlock
+        success = flowManager->startFlow(flowType, params);
+    } else {
+        // Different thread - marshal to Qt thread
+        QMetaObject::invokeMethod(flowManager,
+                                 [flowType, params, &success]() {
+            success = StatusKeycard::FlowManager::instance()->startFlow(flowType, params);
+        }, Qt::BlockingQueuedConnection);
+    }
     
     if (success) {
         const char* response = R"({"success": true})";
@@ -261,8 +277,21 @@ char* KeycardResumeFlowWithContext(StatusKeycardContext ctx, const char* jsonPar
         }
     }
     
-    // Resume flow
-    bool success = StatusKeycard::FlowManager::instance()->resumeFlow(params);
+    // IMPORTANT: Marshal to Qt main thread (same reason as startFlow)
+    bool success = false;
+    
+    // Check if we're already on the Qt main thread
+    auto flowManager = StatusKeycard::FlowManager::instance();
+    if (QThread::currentThread() == flowManager->thread()) {
+        // Already on Qt thread - call directly to avoid deadlock
+        success = flowManager->resumeFlow(params);
+    } else {
+        // Different thread - marshal to Qt thread
+        QMetaObject::invokeMethod(flowManager,
+                                 [params, &success]() {
+            success = StatusKeycard::FlowManager::instance()->resumeFlow(params);
+        }, Qt::BlockingQueuedConnection);
+    }
     
     if (success) {
         const char* response = R"({"success": true})";
@@ -283,8 +312,21 @@ char* KeycardCancelFlowWithContext(StatusKeycardContext ctx) {
         return strdup(error);
     }
     
-    // Cancel flow
-    bool success = StatusKeycard::FlowManager::instance()->cancelFlow();
+    // IMPORTANT: Marshal to Qt main thread (same reason as startFlow)
+    bool success = false;
+    
+    // Check if we're already on the Qt main thread
+    auto flowManager = StatusKeycard::FlowManager::instance();
+    if (QThread::currentThread() == flowManager->thread()) {
+        // Already on Qt thread - call directly to avoid deadlock
+        success = flowManager->cancelFlow();
+    } else {
+        // Different thread - marshal to Qt thread
+        QMetaObject::invokeMethod(flowManager,
+                                 [&success]() {
+            success = StatusKeycard::FlowManager::instance()->cancelFlow();
+        }, Qt::BlockingQueuedConnection);
+    }
     
     if (success) {
         const char* response = R"({"success": true})";

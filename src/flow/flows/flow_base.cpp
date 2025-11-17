@@ -166,7 +166,7 @@ bool FlowBase::waitForCard()
     while (true) {
         // Still no card after 150ms - pause and wait for user
         qDebug() << "FlowBase: No card after 150ms, pausing...";
-        pauseAndWait(FlowSignals::INSERT_CARD, "connection");
+        pauseAndWait(FlowSignals::INSERT_CARD, "connection-error");
         
         if (m_cancelled) {
             qDebug() << "FlowBase: Cancelled while waiting for card";

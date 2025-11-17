@@ -2,6 +2,7 @@
 #include "storage/pairing_storage.h"
 #include "signal_manager.h"
 #include <keycard-qt/types.h>
+#include <keycard-qt/backends/keycard_channel_qt_nfc.h>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -202,6 +203,10 @@ void SessionManager::onReaderAvailabilityChanged(bool available)
         // This matches Go's connectCard() line 252: kc.status.Reset(WaitingForCard)
         if (m_state == SessionState::UnknownReaderState || m_state == SessionState::WaitingForReader) {
             setState(SessionState::WaitingForCard);
+            
+            // Note: iOS NFC session is NOT started here anymore
+            // It will start lazily on first transmit() call (when actually needed)
+            // This allows user to enter PIN, etc. before showing iOS NFC drawer
         }
     } else {
         // No readers present - clear any connection and transition to WaitingForReader
@@ -258,6 +263,9 @@ void SessionManager::onCardRemoved()
     
     if (m_started) {
         setState(SessionState::WaitingForCard);
+        
+        // Note: iOS NFC session will restart automatically on next transmit()
+        // No need to manually restart here
     }
 }
 
@@ -535,9 +543,15 @@ bool SessionManager::initialize(const QString& pin, const QString& puk, const QS
     
     closeSecureChannel();
     
+    // Disconnect from card (important for NFC backends to trigger re-detection)
+    qDebug() << "SessionManager: Disconnecting from card";
+    m_channel->disconnect();
+    
     // Force card re-detection (matches status-keycard-go forceScan())
-    // This will trigger the PC/SC detection loop to re-detect the card:
-    // 1. Exit watchCardRemoval() phase
+    // PC/SC: This will trigger the detection loop to re-detect the card
+    // NFC: This is a no-op, re-detection happens automatically after disconnect()
+    // Flow:
+    // 1. Exit watchCardRemoval() phase (PC/SC) or close connection (NFC)
     // 2. Return to detection phase
     // 3. Re-detect card and emit targetDetected signal
     // 4. onCardDetected() will be called automatically
@@ -747,9 +761,15 @@ bool SessionManager::factoryReset()
     
     closeSecureChannel();
     
+    // Disconnect from card (important for NFC backends to trigger re-detection)
+    qDebug() << "SessionManager: Disconnecting from card";
+    m_channel->disconnect();
+    
     // Force card re-detection (matches status-keycard-go forceScan())
-    // This will:
-    // 1. Exit watchCardRemoval() phase
+    // PC/SC: This will trigger the detection loop to re-detect the card
+    // NFC: This is a no-op, re-detection happens automatically after disconnect()
+    // Flow:
+    // 1. Exit watchCardRemoval() phase (PC/SC) or close connection (NFC)
     // 2. Return to detection phase  
     // 3. Re-detect card and emit targetDetected signal
     // 4. onCardDetected() will be called automatically

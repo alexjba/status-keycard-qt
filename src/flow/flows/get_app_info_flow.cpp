@@ -63,8 +63,11 @@ QJsonObject GetAppInfoFlow::execute()
         
         qDebug() << "GetAppInfoFlow: Factory reset completed successfully";
         
-        // After factory reset, trigger card re-detection
+        // After factory reset, disconnect and trigger card re-detection
         // This matches SessionManager::factoryReset() behavior
+        qDebug() << "GetAppInfoFlow: Disconnecting from card";
+        channel()->disconnect();
+        
         qDebug() << "GetAppInfoFlow: Forcing card re-scan after factory reset";
         channel()->forceScan();
         
