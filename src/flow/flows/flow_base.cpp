@@ -5,6 +5,12 @@
 #include <keycard-qt/keycard_channel.h>
 #include <QDebug>
 #include <QThread>
+#include <QEventLoop>
+#include <QTimer>
+#include <QCryptographicHash>
+#include <QJsonArray>
+#include <openssl/evp.h>
+#include <openssl/sha.h>
 
 namespace StatusKeycard {
 
@@ -16,20 +22,19 @@ FlowBase::FlowBase(FlowManager* manager, FlowType type, const QJsonObject& param
     , m_paused(false)
     , m_cancelled(false)
     , m_shouldRestart(false)
-    , m_commandSet(nullptr)
 {
-    qDebug() << "FlowBase: Created flow type:" << static_cast<int>(type);
 }
 
 FlowBase::~FlowBase()
 {
-    qDebug() << "FlowBase: Destroyed flow type:" << static_cast<int>(m_flowType);
+}
+
+const FlowBase::CardInfo FlowBase::cardInfo() const {
+    return buildCardInfo();
 }
 
 void FlowBase::resume(const QJsonObject& newParams)
 {
-    qDebug() << "FlowBase: Resuming flow with new params";
-    
     QMutexLocker locker(&m_resumeMutex);
     
     // Merge new params into existing params
@@ -44,8 +49,6 @@ void FlowBase::resume(const QJsonObject& newParams)
 
 void FlowBase::cancel()
 {
-    qDebug() << "FlowBase: Cancelling flow";
-    
     QMutexLocker locker(&m_resumeMutex);
     m_cancelled = true;
     m_resumeCondition.wakeAll();
@@ -55,14 +58,21 @@ void FlowBase::cancel()
 // Access to manager resources
 // ============================================================================
 
-Keycard::KeycardChannel* FlowBase::channel()
+Keycard::KeycardChannel* FlowBase::channel() const
 {
+    if (!m_manager) {
+        qWarning() << "FlowBase::channel() No FlowManager available";
+        return nullptr;
+    }
     return m_manager->channel();
 }
 
-PairingStorage* FlowBase::storage()
-{
-    return m_manager->storage();
+std::shared_ptr<Keycard::CommandSet> FlowBase::commandSet() const { 
+    if (!m_manager) {
+        qWarning() << "FlowBase::commandSet() No FlowManager available";
+        return nullptr;
+    }
+    return m_manager->commandSet();
 }
 
 // ============================================================================
@@ -77,22 +87,34 @@ void FlowBase::pauseAndWait(const QString& action, const QString& error)
 void FlowBase::pauseAndWaitWithStatus(const QString& action, const QString& error, 
                                      const QJsonObject& status)
 {
-    qDebug() << "FlowBase: Pausing flow, action:" << action << "error:" << error;
+    // iOS: Manage NFC drawer based on action type
+    if (action == FlowSignals::INSERT_CARD) {
+        // Waiting for card - open NFC drawer
+        qDebug() << "FlowBase: Opening NFC drawer to wait for card, action:" << action;
+        channel()->setState(Keycard::ChannelState::WaitingForCard);
+    } else if (action == FlowSignals::ENTER_PIN || 
+               action == FlowSignals::ENTER_PUK || 
+               action.contains("enter-") || action.contains("input-")) {
+        // Waiting for user input - close NFC drawer so user can interact with UI
+        qDebug() << "FlowBase: Closing NFC drawer for user input action:" << action;
+        channel()->setState(Keycard::ChannelState::UserInput);
+    }
     
     // Build event with error and status
     QJsonObject event = status;
     event[FlowParams::ERROR_KEY] = error;
-    
+    auto info = cardInfo();
+
     // Add card info if available
-    if (m_cardInfo.freeSlots >= 0) {
-        event[FlowParams::INSTANCE_UID] = m_cardInfo.instanceUID;
-        event[FlowParams::KEY_UID] = m_cardInfo.keyUID;
-        event[FlowParams::FREE_SLOTS] = m_cardInfo.freeSlots;
+    if (info.freeSlots >= 0) {
+        event[FlowParams::INSTANCE_UID] = info.instanceUID;
+        event[FlowParams::KEY_UID] = info.keyUID;
+        event[FlowParams::FREE_SLOTS] = info.freeSlots;
     }
     
-    if (m_cardInfo.pinRetries >= 0) {
-        event[FlowParams::PIN_RETRIES] = m_cardInfo.pinRetries;
-        event[FlowParams::PUK_RETRIES] = m_cardInfo.pukRetries;
+    if (info.pinRetries >= 0) {
+        event[FlowParams::PIN_RETRIES] = info.pinRetries;
+        event[FlowParams::PUK_RETRIES] = info.pukRetries;
     }
     
     // Emit pause signal
@@ -105,228 +127,261 @@ void FlowBase::pauseAndWaitWithStatus(const QString& action, const QString& erro
     while (m_paused && !m_cancelled) {
         m_resumeCondition.wait(&m_resumeMutex);
     }
-    
-    qDebug() << "FlowBase: Flow resumed, cancelled:" << m_cancelled;
 }
 
 void FlowBase::pauseAndRestart(const QString& action, const QString& error)
 {
-    qDebug() << "FlowBase: Pausing and requesting restart";
     m_shouldRestart = true;
     pauseAndWait(action, error);
-}
-
-void FlowBase::resetCardInfo()
-{
-    m_cardInfo = CardInfo();  // Reset to default values
-    m_cardInfo.freeSlots = -1;
-    m_cardInfo.pinRetries = -1;
-    m_cardInfo.pukRetries = -1;
-    m_cardInfo.version = -1;
 }
 
 // ============================================================================
 // Card operations
 // ============================================================================
 
+// COMMENTED OUT: Using CommandSet::waitForCard() instead for unified architecture
+// This old implementation had platform-specific logic and manual polling.
+// CommandSet::waitForCard() provides cleaner signal-based waiting.
+/*
 bool FlowBase::waitForCard()
 {
-    qDebug() << "FlowBase: Waiting for card...";
+    qDebug() << "FlowBase::waitForCard()";
     
     // Check if cancelled before accessing manager resources
     if (m_cancelled) {
-        qDebug() << "FlowBase: Cancelled before card check";
         return false;
     }
     
     // Check if card already present at flow start
     // If so, don't emit card-inserted (matching Go behavior)
     if (channel()->isConnected()) {
-        qDebug() << "FlowBase: Card already connected";
         return true;
     }
     
-    // Wait 150ms for card (matching Go: time.NewTimer(150 * time.Millisecond))
-    qDebug() << "FlowBase: Waiting 150ms for card...";
+    // Quick initial check (all platforms: 150ms)
+    // This catches cards that are already present or appear immediately
     QThread::msleep(150);
     
-    // Check if cancelled during sleep (BEFORE accessing manager resources)
+    // Check if cancelled during sleep
     if (m_cancelled) {
-        qDebug() << "FlowBase: Cancelled during card wait";
         return false;
     }
     
-    // Check again after wait
+    // Check if card appeared during initial wait
     if (channel()->isConnected()) {
-        qDebug() << "FlowBase: Card detected after 150ms wait";
         return true;
     }
     
     // Loop until card detected (matching Go's connect() pattern)
     while (true) {
-        // Still no card after 150ms - pause and wait for user
-        qDebug() << "FlowBase: No card after 150ms, pausing...";
+#if defined(Q_OS_IOS) || defined(Q_OS_ANDROID)
+        // iOS: Open drawer and wait 30 seconds BEFORE sending INSERT_CARD to Desktop
+        // This prevents Desktop's cancel+retry loop from spamming drawer open/close
+        channel()->setState(Keycard::ChannelState::WaitingForCard);
+        
+        const int maxIterations = 300; // 30s = 300 * 100ms
+        bool cardDetected = false;
+        
+        for (int i = 0; i < maxIterations; i++) {
+            QThread::msleep(100);
+            
+            // Check if flow was cancelled
+            if (m_cancelled) {
+                channel()->setState(Keycard::ChannelState::Idle); // Close drawer
+                return false;
+            }
+            
+            // Check if card was detected
+            if (channel()->isConnected()) {
+                cardDetected = true;
+                break;
+            }
+            
+            // Check if NFC session was cancelled by user (drawer dismissed)
+            Keycard::ChannelState currentState = channel()->state();
+            if (currentState != Keycard::ChannelState::WaitingForCard && 
+                currentState != Keycard::ChannelState::CardPresent) {
+                emit flowError("NFC session cancelled by user");
+                return false;
+            }
+        }
+        
+        if (cardDetected) {
+            FlowSignals::emitCardInserted();
+            return true;
+        }
+        
+        // No card after 30s - send INSERT_CARD and let Desktop handle retry
+        channel()->setState(Keycard::ChannelState::Idle); // Close drawer before sending signal
         pauseAndWait(FlowSignals::INSERT_CARD, "connection-error");
         
         if (m_cancelled) {
-            qDebug() << "FlowBase: Cancelled while waiting for card";
+            return false;
+        }
+        
+        // Desktop will cancel and retry - loop back to reopen drawer
+#else
+        // PC/SC/Android: Send INSERT_CARD immediately and wait for Desktop/user response
+        pauseAndWait(FlowSignals::INSERT_CARD, "connection-error");
+        
+        if (m_cancelled) {
             return false;
         }
         
         // After resume, check if card is now present
         if (channel()->isConnected()) {
-            qDebug() << "FlowBase: Card inserted after pause";
-            // ONLY emit card-inserted if we were paused (matching Go behavior!)
             FlowSignals::emitCardInserted();
             return true;
         }
-        
-        // User resumed - check for card again (loop back)
-        qDebug() << "FlowBase: Resumed, checking for card again...";
+#endif
     }
 }
+*/
 
 bool FlowBase::selectKeycard()
 {
-    qDebug() << "FlowBase: Selecting keycard applet...";
+    qDebug() << "FlowBase::selectKeycard()";
     
-    // Make sure we have a card
-    if (!channel()->isConnected()) {
-        qWarning() << "FlowBase: No card connection!";
-        if (!waitForCard()) {
-            return false;
-        }
-    }
-    
-    // Create CommandSet if needed
-    // Use FlowManager's persistent CommandSet (maintains secure channel across flows)
-    if (!m_commandSet) {
-        m_commandSet = m_manager->commandSet();
-        if (!m_commandSet) {
-            qCritical() << "FlowBase: FlowManager CommandSet not initialized!";
-            emit flowError("Internal error: CommandSet not initialized");
-            return false;
-        }
+    if (!commandSet()) {
+        qCritical() << "FlowBase: No CommandSet available";
+        emit flowError("No CommandSet available");
+        return false;
     }
     
     // Select keycard applet
-    Keycard::ApplicationInfo appInfo = m_commandSet->select();
+    Keycard::ApplicationInfo appInfo = commandSet()->select();
     if (!appInfo.installed) {
         qCritical() << "FlowBase: Keycard applet not installed!";
         emit flowError("Keycard applet not installed");
         return false;
     }
     
-    // Update card info
-    updateCardInfo(appInfo);
-    
-    qDebug() << "FlowBase: Keycard selected. InstanceUID:" << m_cardInfo.instanceUID
-             << "KeyUID:" << m_cardInfo.keyUID;
-    
     return true;
 }
 
-bool FlowBase::openSecureChannelAndAuthenticate(bool authenticate)
+FlowResult FlowBase::initializeKeycard()
 {
-    qDebug() << "FlowBase: Opening secure channel, authenticate:" << authenticate;
-    
-    // Try to find pairing for this card
-    Keycard::PairingInfo pairing = storage()->loadPairing(m_cardInfo.instanceUID);
-    
-    if (!pairing.isValid()) {
-        qDebug() << "FlowBase: No pairing found, attempting to pair";
-        
-        // Try default pairing password first (matching status-keycard-go behavior)
-        QString pairingPassword = "KeycardDefaultPairing";
-        qDebug() << "FlowBase: Trying default pairing password:" << pairingPassword;
-        
-        Keycard::PairingInfo pairingInfo = m_commandSet->pair(pairingPassword);
-        
-        // If default pairing fails, check why
-        if (!pairingInfo.isValid()) {
-            QString error = m_commandSet->lastError();
-            qDebug() << "FlowBase: Default pairing failed, error:" << error;
-            
-            // Check if failure is due to no available pairing slots
-            if (error.contains("No available slots") || error.contains("6a84")) {
-                qCritical() << "FlowBase: Card has no available pairing slots!";
-                qCritical() << "FlowBase: Cannot pair with this card - all slots full";
-                emit flowError("No available pairing slots");
-                return false;
-            }
-            
-            // Otherwise, ask user for custom pairing password
-            qDebug() << "FlowBase: Requesting user to provide pairing password";
-            
-            // Request pairing password from user
-            pauseAndWait(FlowSignals::ENTER_PAIRING, "enter-pairing");
-            
-            if (m_cancelled) {
-                return false;
-            }
-            
-            // Get pairing password from params
-            pairingPassword = m_params[FlowParams::PAIRING_PASS].toString();
-            if (pairingPassword.isEmpty()) {
-                qCritical() << "FlowBase: No pairing password provided!";
-                emit flowError("No pairing password provided");
-                return false;
-            }
-            
-            // Try pairing with user-provided password
-            qDebug() << "FlowBase: Trying user-provided pairing password";
-            pairingInfo = m_commandSet->pair(pairingPassword);
-            if (!pairingInfo.isValid()) {
-                qCritical() << "FlowBase: Pairing failed with user password!";
-                emit flowError("Pairing failed");
-                return false;
-            }
+    // Check if card is initialized (pre-initialized cards need initialization first)
+    // This matches status-keycard-go behavior: pause and ask for PIN/PUK/pairing
+    QJsonObject result = buildCardInfoJson();
+
+    QString pin = m_params[FlowParams::NEW_PIN].toString();
+    if (pin.isEmpty()) {
+        pauseAndWait(FlowSignals::ENTER_NEW_PIN, "require-init");
+        if (isCancelled()) {
+            result[FlowParams::ERROR_KEY] = "cancelled";
+            return FlowResult{false, result};
         }
-        
-        qDebug() << "FlowBase: Pairing successful!";
-        
-        // Save pairing to memory and persist to disk
-        storage()->storePairing(m_cardInfo.instanceUID, pairingInfo);
-        if (!storage()->save()) {
-            qWarning() << "FlowBase: Failed to persist pairing to disk:" << storage()->lastError();
-            qWarning() << "FlowBase: Pairing will be lost on restart!";
-        } else {
-            qDebug() << "FlowBase: Pairing saved to disk";
+        pin = m_params[FlowParams::NEW_PIN].toString();
+    }
+
+    QString puk = m_params[FlowParams::NEW_PUK].toString();
+    if (puk.isEmpty()) {
+        pauseAndWait(FlowSignals::ENTER_NEW_PUK, "require-init");
+        if (isCancelled()) {
+            result[FlowParams::ERROR_KEY] = "cancelled";
+            return FlowResult{false, result};
         }
-        pairing = pairingInfo;
-        
-        qDebug() << "FlowBase: Paired successfully";
+        puk = m_params[FlowParams::NEW_PUK].toString();
+    }
+
+    QString pairingPassword = m_params[FlowParams::NEW_PAIRING].toString();
+    if (pairingPassword.isEmpty()) {
+        pairingPassword = "KeycardDefaultPairing";
     }
     
-    // Open secure channel
-    bool opened = m_commandSet->openSecureChannel(pairing);
-    
-    if (!opened) {
-        qCritical() << "FlowBase: Failed to open secure channel!";
-        emit flowError("Failed to open secure channel");
+    auto cmdSet = commandSet();
+    Keycard::Secrets secrets(pin, puk, pairingPassword);
+    if (!cmdSet || !cmdSet->init(secrets)) {
+        qWarning() << "FlowBase: Card initialization failed:" << (cmdSet ? cmdSet->lastError() : "No CommandSet");
+        result[FlowParams::ERROR_KEY] = "init-failed";
+        return FlowResult{false, result};
+    }
+
+    return FlowResult{true, buildCardInfoJson()};
+}
+
+bool FlowBase::unblockPIN()
+{
+    qDebug() << "FlowBase: Unblocking PIN...";
+    if (!commandSet()) {
+        qCritical() << "FlowBase: No CommandSet available";
+        emit flowError("No CommandSet available");
         return false;
     }
-    
-    qDebug() << "FlowBase: Secure channel opened";
-    
-    // Authenticate if requested
-    if (authenticate) {
-        return verifyPIN();
+
+    QString puk = m_params[FlowParams::PUK].toString();
+
+    if (puk.isEmpty()) {
+        pauseAndWait(FlowSignals::ENTER_PUK, "");
+        if (m_cancelled) {
+            return false;
+        }
     }
+
+    QString newPIN = m_params[FlowParams::NEW_PIN].toString();
+
+    if (newPIN.isEmpty()) {
+        pauseAndWait(FlowSignals::ENTER_NEW_PIN, "unblocking");
+        if (m_cancelled) {
+            return false;
+        }
+        newPIN = m_params[FlowParams::NEW_PIN].toString();
+    }
+
+    auto ok = commandSet()->unblockPIN(puk, newPIN);
+    if (!ok) {
+        if (commandSet()->cachedApplicationStatus().pukRetryCount == 0) {
+            return false;
+        }
+        pauseAndWait(FlowSignals::ENTER_PUK, "puk");
+        if (m_cancelled) {
+            return false;
+        }
+        return unblockPIN();
+    }
+
+    m_params[FlowParams::PIN] = newPIN;
     
     return true;
 }
 
-bool FlowBase::verifyPIN()
+bool FlowBase::verifyPIN(bool giveup)
 {
     qDebug() << "FlowBase: Verifying PIN...";
+    if (!commandSet()) {
+        qCritical() << "FlowBase: No CommandSet available";
+        emit flowError("No CommandSet available");
+        return false;
+    }
+
+    auto appInfo = commandSet()->select();
+
+    if (!appInfo.initialized) {
+        if (!giveup)
+            return initializeKeycard().ok;
+        return true;
+    }
+
+    auto appStatus = commandSet()->getStatus(Keycard::APDU::P1GetStatusApplication);
+    if (appStatus.pinRetryCount == 0 && appStatus.valid) {
+        qWarning() << "FlowBase: PIN blocked!";
+        auto ok = unblockPIN();
+        if (m_cancelled) {
+            return false;
+        }
+        if (!ok) {
+            pauseAndRestart(FlowSignals::SWAP_CARD, "puk-retries");
+            return false;
+        }
+    }
     
     // Check if PIN already in params
     QString pin = m_params[FlowParams::PIN].toString();
     
     if (pin.isEmpty()) {
-        // Request PIN
-        pauseAndWait(FlowSignals::ENTER_PIN, "enter-pin");
+        // Request PIN (empty error means normal PIN request, not an error condition)
+        pauseAndWait(FlowSignals::ENTER_PIN, "");
         
         if (m_cancelled) {
             return false;
@@ -342,20 +397,11 @@ bool FlowBase::verifyPIN()
     }
     
     // Verify PIN
-    auto response = m_commandSet->verifyPIN(pin);
+    auto response = commandSet()->verifyPIN(pin);
     if (!response) {
         qCritical() << "FlowBase: PIN verification failed!";
-        
-        // Update retry count
-        m_cardInfo.pinRetries--;
-        
-        if (m_cardInfo.pinRetries <= 0) {
-            emit flowError("PIN blocked");
-            return false;
-        }
-        
-        // Wrong PIN, ask again
-        pauseAndWait(FlowSignals::ENTER_PIN, "wrong-pin");
+        // Wrong PIN, ask again (pauseAndWait will include pinRetries in the event)
+        pauseAndWait(FlowSignals::ENTER_PIN, "pin");
         
         if (m_cancelled) {
             return false;
@@ -371,16 +417,13 @@ bool FlowBase::verifyPIN()
 
 bool FlowBase::requireKeys()
 {
-    if (!m_cardInfo.keyUID.isEmpty()) {
+    if (!cardInfo().keyUID.isEmpty()) {
         qDebug() << "FlowBase: Card has keys";
         return true;
     }
     
     qWarning() << "FlowBase: Card has no keys!";
-    
-    // Build card info
-    QJsonObject cardInfo = buildCardInfoJson();
-    
+
     // Request card swap
     pauseAndRestart(FlowSignals::SWAP_CARD, "no-keys");
     
@@ -388,78 +431,326 @@ bool FlowBase::requireKeys()
     return false; // Will restart flow
 }
 
-bool FlowBase::requireNoKeys()
+FlowResult FlowBase::requireNoKeys()
 {
-    if (m_cardInfo.keyUID.isEmpty()) {
+    QJsonObject result = buildCardInfoJson();
+    if (cardInfo().keyUID.isEmpty()) {
         qDebug() << "FlowBase: Card has no keys (as required)";
-        return true;
+        return {true, result};
     }
     
     // Check if overwrite allowed
     if (m_params.contains(FlowParams::OVERWRITE) && 
         m_params[FlowParams::OVERWRITE].toBool()) {
         qDebug() << "FlowBase: Card has keys but overwrite allowed";
-        return true;
+        return {true, result};
     }
-    
-    qWarning() << "FlowBase: Card already has keys!";
-    
-    // Build card info
-    QJsonObject cardInfo = buildCardInfoJson();
     
     // Request card swap
     pauseAndRestart(FlowSignals::SWAP_CARD, "has-keys");
     
-    return false; // Will restart flow
+    result[FlowParams::ERROR_KEY] = "has-keys";
+    return {false, result}; // Will restart flow
+}
+
+// Convert BIP39 mnemonic to binary seed using PBKDF2-HMAC-SHA512
+// This matches the BIP39 standard and status-keycard-go implementation
+QByteArray FlowBase::mnemonicToSeed(const QString& mnemonic, const QString& password)
+{
+    // BIP39 standard:
+    // - Key: mnemonic (NFKD normalized)
+    // - Salt: "mnemonic" + password (NFKD normalized)
+    // - Iterations: 2048
+    // - Key length: 64 bytes
+    // - Hash: SHA-512
+    
+    // Qt's QString already handles Unicode, we use normalized form for consistency
+    QString normalizedMnemonic = mnemonic.normalized(QString::NormalizationForm_D);
+    QString normalizedPassword = password.normalized(QString::NormalizationForm_D);
+    
+    // BIP39 salt is "mnemonic" + password
+    QString saltString = QString("mnemonic") + normalizedPassword;
+    
+    QByteArray mnemonicBytes = normalizedMnemonic.toUtf8();
+    QByteArray saltBytes = saltString.toUtf8();
+    
+    // Allocate 64 bytes for the derived key (BIP39 standard)
+    QByteArray seed(64, 0);
+    
+    // Use OpenSSL's PBKDF2-HMAC-SHA512
+    int result = PKCS5_PBKDF2_HMAC(
+        mnemonicBytes.constData(), mnemonicBytes.size(),
+        reinterpret_cast<const unsigned char*>(saltBytes.constData()), saltBytes.size(),
+        2048,  // iterations (BIP39 standard)
+        EVP_sha512(),
+        64,    // key length (BIP39 standard)
+        reinterpret_cast<unsigned char*>(seed.data())
+    );
+    
+    if (result != 1) {
+        qWarning() << "LoadAccountFlow: PBKDF2 failed";
+        return QByteArray();
+    }
+    
+    return seed;
+}
+
+FlowResult FlowBase::loadMnemonic()
+{
+    // Get mnemonic from params (or generate indexes and pause to request it)
+    QString mnemonic = m_params[FlowParams::MNEMONIC].toString();
+    if (mnemonic.isEmpty()) {
+        int mnemonicLength = 12; // Default BIP39 mnemonic length
+        if (m_params.contains(FlowParams::MNEMONIC_LEN)) {
+            mnemonicLength = m_params[FlowParams::MNEMONIC_LEN].toInt();
+        }
+        int checksumSize = mnemonicLength / 3;
+        
+        auto cmdSet = commandSet();
+        QVector<int> indexes = cmdSet->generateMnemonic(checksumSize);
+        QJsonObject result = buildCardInfoJson();
+
+        if (indexes.isEmpty() || !cmdSet->lastError().isEmpty()) {
+            qWarning() << "LoadAccountFlow: Failed to generate mnemonic:" << cmdSet->lastError();
+            result[FlowParams::ERROR_KEY] = "generate-failed";
+            return FlowResult{false, result};
+        }        
+        // Add mnemonic-indexes array
+        QJsonArray indexesArray;
+        for (int idx : indexes) {
+            indexesArray.append(idx);
+        }
+        result[FlowParams::MNEMONIC_IDXS] = indexesArray;
+
+        pauseAndWaitWithStatus(FlowSignals::ENTER_MNEMONIC, "loading-keys", result);
+        
+        if (isCancelled()) {
+            result[FlowParams::ERROR_KEY] = "cancelled";
+            return FlowResult{false, result};
+        }
+        mnemonic = m_params[FlowParams::MNEMONIC].toString();
+        
+        // // After user entered mnemonic, check if card is still present
+        // // - PCSC: Card likely still connected → waitForCard returns immediately
+        // // - iOS/Android: Card was disconnected (setState(UserInput)) → waitForCard handles re-tap
+        // if (!commandSet()->waitForCard()) {
+        //     QJsonObject error;
+        //     error[FlowParams::ERROR_KEY] = "cancelled";
+        //     return error;
+        // }
+
+        // // Re-authenticate after card re-tap
+        // // - PCSC: Card stayed connected, but secure channel might have been reset
+        // // - iOS/Android: Card was re-tapped, need to re-establish secure channel
+        // // loadSeed() requires authenticated secure channel
+        // qDebug() << "LoadAccountFlow: Re-authenticating after mnemonic entry";
+        // if (!openSecureChannelAndAuthenticate(true)) {
+        //     QJsonObject error;
+        //     error[FlowParams::ERROR_KEY] = "auth-failed";
+        //     return error;
+        // }
+        // // Re-select keycard applet after card reconnection
+        // // On Android/iOS, after setState(UserInput) disconnect, the card reconnects but applet isn't selected
+        // // We must re-select before we can send keycard-specific APDUs
+        // qDebug() << "LoadAccountFlow: Re-selecting keycard applet after mnemonic entry";
+        // if (!selectKeycard()) {
+        //     QJsonObject error;
+        //     error[FlowParams::ERROR_KEY] = "select-failed";
+        //     return error;
+        // }
+        
+        // // Re-authenticate after card re-tap
+        // // - PCSC: Card stayed connected, but secure channel might have been reset
+        // // - iOS/Android: Card was re-tapped, need to re-establish secure channel
+        // // loadSeed() requires authenticated secure channel
+        // qDebug() << "LoadAccountFlow: Re-authenticating after mnemonic entry";
+        // if (!openSecureChannelAndAuthenticate(false)) {
+        //     QJsonObject error;
+        //     error[FlowParams::ERROR_KEY] = "auth-failed";
+        //     return error;
+        // }
+    }
+
+    // Convert mnemonic to seed using BIP39 standard (PBKDF2-HMAC-SHA512)
+    QByteArray seed = mnemonicToSeed(mnemonic, "");
+    if (seed.isEmpty()) {
+        qWarning() << "LoadAccountFlow: Failed to convert mnemonic to seed";
+        QJsonObject result = buildCardInfoJson();
+        result[FlowParams::ERROR_KEY] = "mnemonic-conversion-failed";
+        return FlowResult{false, result};
+    }
+    
+    // Load seed onto card
+    auto cmdSet = commandSet();
+    QByteArray keyUID = cmdSet->loadSeed(seed);
+    QJsonObject result = buildCardInfoJson();
+
+    if (keyUID.isEmpty()) {
+        qWarning() << "LoadAccountFlow: Failed to load seed onto card";
+        result[FlowParams::ERROR_KEY] = "load-failed";
+        return FlowResult{false, result};
+    }
+
+    result[FlowParams::KEY_UID] = QString("0x") + keyUID.toHex();
+
+    return FlowResult{true, result};
 }
 
 // ============================================================================
 // Card information
 // ============================================================================
 
-void FlowBase::updateCardInfo(const Keycard::ApplicationInfo& appInfo)
+FlowBase::CardInfo FlowBase::buildCardInfo() const
 {
-    m_cardInfo.instanceUID = appInfo.instanceUID.toHex();
-    m_cardInfo.keyUID = appInfo.keyUID.toHex();
-    m_cardInfo.initialized = appInfo.initialized;
-    m_cardInfo.freeSlots = appInfo.availableSlots;
-    m_cardInfo.keyInitialized = !appInfo.keyUID.isEmpty();
-    m_cardInfo.version = (appInfo.appVersion << 8) | appInfo.appVersionMinor;
+    FlowBase::CardInfo result;
+    if (!commandSet())
+        return result;
+
+    auto appInfo = commandSet()->applicationInfo();
+    auto appStatus = commandSet()->cachedApplicationStatus();
+
+    result.instanceUID = appInfo.instanceUID.toHex();
+    result.keyUID = appInfo.keyUID.toHex();
+    result.initialized = appInfo.initialized;
+    result.freeSlots = appInfo.availableSlots;
+    result.keyInitialized = !appInfo.keyUID.isEmpty();
+    result.version = (appInfo.appVersion << 8) | appInfo.appVersionMinor;
     
     // Get status to get PIN/PUK retry counts
     // Note: This requires secure channel, so we'll set defaults for now
     // and update later when we have secure channel
-    m_cardInfo.pinRetries = -1;
-    m_cardInfo.pukRetries = -1;
-    
-    qDebug() << "FlowBase: Card info updated:"
-             << "initialized:" << m_cardInfo.initialized
-             << "keyInitialized:" << m_cardInfo.keyInitialized
-             << "version:" << QString("0x%1").arg(m_cardInfo.version, 0, 16);
+    result.pinRetries = appStatus.pinRetryCount;
+    result.pukRetries = appStatus.pukRetryCount;
+    return result;
 }
 
 QJsonObject FlowBase::buildCardInfoJson() const
 {
     QJsonObject json;
+    auto info = cardInfo();
     
-    if (!m_cardInfo.instanceUID.isEmpty()) {
-        json[FlowParams::INSTANCE_UID] = m_cardInfo.instanceUID;
+    if (!info.instanceUID.isEmpty()) {
+        json[FlowParams::INSTANCE_UID] = info.instanceUID;
     }
     
-    if (!m_cardInfo.keyUID.isEmpty()) {
-        json[FlowParams::KEY_UID] = m_cardInfo.keyUID;
+    if (!info.keyUID.isEmpty()) {
+        json[FlowParams::KEY_UID] = info.keyUID;
     }
     
-    if (m_cardInfo.freeSlots >= 0) {
-        json[FlowParams::FREE_SLOTS] = m_cardInfo.freeSlots;
+    if (info.freeSlots >= 0) {
+        json[FlowParams::FREE_SLOTS] = info.freeSlots;
     }
     
-    if (m_cardInfo.pinRetries >= 0) {
-        json[FlowParams::PIN_RETRIES] = m_cardInfo.pinRetries;
-        json[FlowParams::PUK_RETRIES] = m_cardInfo.pukRetries;
+    if (info.pinRetries >= 0) {
+        json[FlowParams::PIN_RETRIES] = info.pinRetries;
+        json[FlowParams::PUK_RETRIES] = info.pukRetries;
     }
     
     return json;
+}
+
+QString FlowBase::publicKeyToAddress(const QByteArray& pubKey) {
+    if (pubKey.size() != 65 || pubKey[0] != 0x04) {
+        qWarning() << "Invalid public key format";
+        return QString();
+    }
+    
+    // Remove 0x04 prefix, hash with Keccak-256, take last 20 bytes
+    QByteArray pubKeyData = pubKey.mid(1);
+    QByteArray hash = QCryptographicHash::hash(pubKeyData, QCryptographicHash::Keccak_256);
+    QByteArray address = hash.right(20);
+    
+    return QString("0x") + address.toHex();
+}
+
+// Helper to parse TLV length (BER-TLV format)
+static quint32 parseTlvLength(const QByteArray& data, int& offset) {
+    if (offset >= data.size()) {
+        return 0;
+    }
+    
+    uint8_t firstByte = static_cast<uint8_t>(data[offset]);
+    offset++;
+    
+    if ((firstByte & 0x80) == 0) {
+        // Short form: length is in the lower 7 bits
+        return firstByte;
+    }
+    
+    // Long form: lower 7 bits indicate number of length bytes
+    int numLengthBytes = firstByte & 0x7F;
+    if (numLengthBytes > 4 || offset + numLengthBytes > data.size()) {
+        return 0;
+    }
+    
+    quint32 length = 0;
+    for (int i = 0; i < numLengthBytes; i++) {
+        length = (length << 8) | static_cast<uint8_t>(data[offset]);
+        offset++;
+    }
+    
+    return length;
+}
+
+// Helper to find a TLV tag in data
+static QByteArray findTlvTag(const QByteArray& data, uint8_t targetTag) {
+    int offset = 0;
+    
+    while (offset < data.size()) {
+        if (offset >= data.size()) {
+            break;
+        }
+        
+        uint8_t tag = static_cast<uint8_t>(data[offset]);
+        offset++;
+        
+        quint32 length = parseTlvLength(data, offset);
+        if (length == 0 && offset >= data.size()) {
+            break;
+        }
+        
+        if (offset + static_cast<int>(length) > data.size()) {
+            break;
+        }
+        
+        if (tag == targetTag) {
+            return data.mid(offset, length);
+        }
+        
+        offset += length;
+    }
+    
+    return QByteArray();
+}
+
+bool FlowBase::parseExportedKey(const QByteArray& data, QByteArray& publicKey, QByteArray& privateKey) {
+    publicKey.clear();
+    privateKey.clear();
+    
+    if (data.isEmpty()) {
+        qWarning() << "parseExportedKey: Empty data";
+        return false;
+    }
+    
+    // Find template tag 0xA1
+    QByteArray template_ = findTlvTag(data, 0xA1);
+    if (template_.isEmpty()) {
+        qWarning() << "parseExportedKey: Failed to find template tag 0xA1";
+        return false;
+    }
+    
+    // Find public key (0x80)
+    publicKey = findTlvTag(template_, 0x80);
+    
+    // Find private key (0x81) if available
+    privateKey = findTlvTag(template_, 0x81);
+    
+    if (publicKey.isEmpty()) {
+        qWarning() << "parseExportedKey: No public key found";
+        return false;
+    }
+    
+    return true;
 }
 
 } // namespace StatusKeycard

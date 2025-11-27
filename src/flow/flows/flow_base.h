@@ -31,6 +31,13 @@ class PairingStorage;
  * - Pause/resume mechanism
  * - Error handling
  */
+
+
+struct FlowResult {
+    bool ok;
+    QJsonObject result;
+};
+
 class FlowBase : public QObject {
     Q_OBJECT
     
@@ -54,7 +61,14 @@ public:
      * @param newParams New parameters provided by user
      */
     void resume(const QJsonObject& newParams);
-    
+
+    /**
+     * @brief Pause and wait for user input
+     * @param action Signal type to emit
+     * @param error Error message
+     */
+    void pauseAndWait(const QString& action, const QString& error);
+
     /**
      * @brief Cancel flow
      */
@@ -93,18 +107,18 @@ protected:
     /**
      * @brief Get keycard channel
      */
-    Keycard::KeycardChannel* channel();
+    Keycard::KeycardChannel* channel() const;
     
     /**
      * @brief Get pairing storage
      */
-    PairingStorage* storage();
+    PairingStorage* storage() const;
     
     /**
      * @brief Get command set
      * @return CommandSet for card operations (shared across all flows)
      */
-    Keycard::CommandSet* commandSet() { return m_commandSet; }
+    std::shared_ptr<Keycard::CommandSet> commandSet() const;
     
     /**
      * @brief Get flow parameters
@@ -114,13 +128,7 @@ protected:
     // ============================================================================
     // Pause/Resume mechanism
     // ============================================================================
-    
-    /**
-     * @brief Pause and wait for user input
-     * @param action Signal type to emit
-     * @param error Error message
-     */
-    void pauseAndWait(const QString& action, const QString& error);
+
     
     /**
      * @brief Pause with additional status info
@@ -145,29 +153,22 @@ protected:
     // ============================================================================
     
     /**
-     * @brief Wait for card detection
-     * @return true if card detected, false if cancelled
-     */
-    bool waitForCard();
-    
-    /**
      * @brief Connect to card and select applet
      * @return true if successful
      */
     bool selectKeycard();
     
     /**
-     * @brief Open secure channel (pair if needed)
-     * @param authenticate If true, also verify PIN
-     * @return true if successful
-     */
-    bool openSecureChannelAndAuthenticate(bool authenticate);
-    
-    /**
      * @brief Verify PIN
      * @return true if successful
      */
-    bool verifyPIN();
+    bool verifyPIN(bool giveup = false);
+
+    /**
+     * @brief Unblock PIN
+     * @return true if successful
+     */
+    bool unblockPIN();
     
     /**
      * @brief Check if card has keys
@@ -179,8 +180,28 @@ protected:
      * @brief Check if card has NO keys
      * @return true if card has no keys
      */
-    bool requireNoKeys();
+    FlowResult requireNoKeys();
+
+
+    /**
+     * @brief Load mnemonic onto card
+     * @return true if successful
+     */
+    FlowResult loadMnemonic();
     
+    /**
+     * @brief Initialize keycard
+     * @return FlowResult
+     */
+    FlowResult initializeKeycard();
+
+    /**
+     * @brief Convert mnemonic to seed
+     * @param mnemonic Mnemonic
+     * @param password Password
+     * @return seed
+     */
+    static QByteArray mnemonicToSeed(const QString& mnemonic, const QString& password);
     // ============================================================================
     // Card information
     // ============================================================================
@@ -202,12 +223,12 @@ protected:
     /**
      * @brief Get current card info
      */
-    const CardInfo& cardInfo() const { return m_cardInfo; }
+    const FlowBase::CardInfo cardInfo() const;
     
     /**
-     * @brief Update card info from ApplicationInfo
+     * @brief Builds CardInfo from ApplicationInfo
      */
-    void updateCardInfo(const Keycard::ApplicationInfo& appInfo);
+    FlowBase::CardInfo buildCardInfo() const;
     
     // ============================================================================
     // Helper utilities
@@ -229,23 +250,34 @@ public:
      */
     void resetRestartFlag() { m_shouldRestart = false; }
     
-    /**
-     * @brief Reset card info for restart (called before re-execution)
-     */
-    void resetCardInfo();
-    
 protected:
     
     /**
      * @brief Build card info JSON for signals
      */
     QJsonObject buildCardInfoJson() const;
-    
+
+
+    /**
+     * @brief Compute Ethereum address from public key using Qt's QCryptographicHash
+     * @param pubKey Public key
+     * @return Ethereum address
+     */
+    static QString publicKeyToAddress(const QByteArray& pubKey);
+
+    /**
+     * @brief Parse exported key data from TLV format
+     * @param data Raw TLV data from exportKey
+     * @param publicKey Output: extracted public key (65 bytes uncompressed)
+     * @param privateKey Output: extracted private key (32 bytes, if present)
+     * @return true if parsing succeeded
+     */
+    static bool parseExportedKey(const QByteArray& data, QByteArray& publicKey, QByteArray& privateKey);
+
 private:
     FlowManager* m_manager;
     FlowType m_flowType;
     QJsonObject m_params;
-    CardInfo m_cardInfo;
     
     // Pause/resume synchronization
     QWaitCondition m_resumeCondition;
@@ -253,10 +285,6 @@ private:
     bool m_paused;
     bool m_cancelled;
     bool m_shouldRestart;
-    
-    // CommandSet for card operations (points to FlowManager's persistent instance)
-    // NOT owned by this class - managed by FlowManager to maintain secure channel
-    Keycard::CommandSet* m_commandSet;
 };
 
 } // namespace StatusKeycard

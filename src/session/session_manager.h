@@ -25,9 +25,19 @@ class SessionManager : public QObject {
 public:
     explicit SessionManager(QObject* parent = nullptr);
     ~SessionManager();
+    
+    /**
+     * @brief Set shared CommandSet (for sharing with FlowManager)
+     * @param commandSet Shared CommandSet instance
+     * 
+     * Must be called before start() if you want to share CommandSet.
+     * If not called, SessionManager will create its own CommandSet.
+     */
+    void setCommandSet(std::shared_ptr<Keycard::CommandSet> commandSet);
+    std::shared_ptr<Keycard::CommandSet> commandSet() const { return m_commandSet; }
 
     // Session lifecycle
-    bool start(const QString& storagePath, bool logEnabled = false, const QString& logFilePath = QString());
+    bool start(bool logEnabled = false, const QString& logFilePath = QString());
     void stop();
     bool isStarted() const { return m_started; }
 
@@ -143,24 +153,20 @@ private slots:
 
 private:
     void setState(SessionState newState);
-    bool openSecureChannel();
-    void closeSecureChannel();
-    bool savePairing(const QString& instanceUID, const Keycard::PairingInfo& pairingInfo);
-    Keycard::PairingInfo loadPairing(const QString& instanceUID);
+    void closeSecureChannel();  // Cleanup CommandSet and channel connection
     void setError(const QString& error);
+    void operationCompleted();
 
     // State
     SessionState m_state;
     bool m_started;
     QString m_lastError;
-    QString m_storagePath;
     
     // Keycard components
-    std::unique_ptr<Keycard::KeycardChannel> m_channel;
-    std::unique_ptr<Keycard::CommandSet> m_commandSet;
+    std::shared_ptr<Keycard::KeycardChannel> m_channel;
+    std::shared_ptr<Keycard::CommandSet> m_commandSet;
     Keycard::ApplicationInfo m_appInfo;
     Keycard::ApplicationStatus m_appStatus;  // Cached status to avoid redundant GET_STATUS calls
-    Keycard::PairingInfo m_pairingInfo;
     
     // Monitoring
     QTimer* m_stateCheckTimer;

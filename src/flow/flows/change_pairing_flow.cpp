@@ -11,13 +11,7 @@ ChangePairingFlow::ChangePairingFlow(FlowManager* mgr, const QJsonObject& params
 
 QJsonObject ChangePairingFlow::execute()
 {
-    if (!waitForCard() || !selectKeycard()) {
-        QJsonObject error;
-        error[FlowParams::ERROR_KEY] = "card-error";
-        return error;
-    }
-    
-    if (!openSecureChannelAndAuthenticate(true)) {
+    if (!verifyPIN()) {
         QJsonObject error;
         error[FlowParams::ERROR_KEY] = "auth-failed";
         return error;
@@ -25,7 +19,8 @@ QJsonObject ChangePairingFlow::execute()
     
     QString newPairing = params()[FlowParams::NEW_PAIRING].toString();
     if (newPairing.isEmpty()) {
-        pauseAndWait(FlowSignals::ENTER_NEW_PAIRING, "enter-new-pairing");
+        // Request new pairing code (empty error = normal request)
+        pauseAndWait(FlowSignals::ENTER_NEW_PAIRING, "");
         if (isCancelled()) {
             QJsonObject error;
             error[FlowParams::ERROR_KEY] = "cancelled";

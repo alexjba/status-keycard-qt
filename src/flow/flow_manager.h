@@ -18,14 +18,13 @@ namespace Keycard {
 namespace StatusKeycard {
 
 class FlowBase;
-class PairingStorage;
 
 /**
  * @brief Flow Manager - Main coordinator for Flow API
  * 
  * Singleton class that:
  * - Manages flow lifecycle
- * - Owns KeycardChannel and PairingStorage
+ * - Uses KeycardChannel and shared CommandSet
  * - Handles NFC events (card detected/removed)
  * - Routes signals to/from flows
  * - Integrates with C API
@@ -51,38 +50,10 @@ public:
     
     /**
      * @brief Initialize flow system
-     * @param storageDir Directory for pairing storage
-     * @param channel Optional KeycardChannel for dependency injection (testing)
-     *                If nullptr, creates default platform channel
+     * @param commandSet Shared CommandSet for sharing with SessionManager
      * @return true if successful
      */
-    bool init(const QString& storageDir, Keycard::KeycardChannel* channel = nullptr);
-    
-    /**
-     * @brief Start continuous card detection (call after init)
-     * 
-     * Starts detection that runs continuously until stopContinuousDetection() is called.
-     * This matches status-keycard-go's behavior where detection runs continuously
-     * after initialization, not per-flow.
-     */
-    void startContinuousDetection();
-    
-    /**
-     * @brief Stop continuous card detection
-     * 
-     * Stops the continuous detection started by startContinuousDetection().
-     * Only needed when shutting down the app.
-     */
-    void stopContinuousDetection();
-    
-    /**
-     * @brief Set custom keycard channel (for testing)
-     * @param channel KeycardChannel to use (takes ownership)
-     * 
-     * Must be called before init or after calling cleanup.
-     * Used for dependency injection in tests.
-     */
-    void setChannel(Keycard::KeycardChannel* channel);
+    bool init(std::shared_ptr<Keycard::CommandSet> commandSet);
     
     /**
      * @brief Start a flow
@@ -128,20 +99,15 @@ public:
     /**
      * @brief Get keycard channel
      */
-    Keycard::KeycardChannel* channel() { return m_channel.get(); }
-    
-    /**
-     * @brief Get pairing storage
-     */
-    PairingStorage* storage() { return m_storage.get(); }
-    
+    Keycard::KeycardChannel* channel() const { return m_channel.get(); }
+
     /**
      * @brief Get command set (shared across all flows)
      * 
      * Returns a persistent CommandSet that maintains the secure channel
      * across multiple flows, matching status-keycard-go's behavior.
      */
-    Keycard::CommandSet* commandSet() { return m_commandSet.get(); }
+    std::shared_ptr<Keycard::CommandSet> commandSet() const { return m_commandSet; }
     
 signals:
     /**
@@ -163,6 +129,13 @@ private slots:
      */
     void onCardRemoved();
     
+private:
+    /**
+     * @brief Build card info JSON from CommandSet's ApplicationInfo
+     * @return JSON with instance-uid, key-uid, free-slots (if available)
+     */
+    QJsonObject buildCardInfoFromCommandSet() const;
+
     /**
      * @brief Handle flow paused (from FlowBase)
      * @param action Signal type
@@ -219,10 +192,8 @@ private:
     QFuture<void> m_flowFuture;  // Track async flow execution to wait for completion
     
     // Resources
-    std::unique_ptr<Keycard::KeycardChannel> m_channel;
-    std::unique_ptr<Keycard::CommandSet> m_commandSet;  // Persistent command set (maintains secure channel)
-    std::unique_ptr<PairingStorage> m_storage;
-    QString m_storageDir;
+    std::shared_ptr<Keycard::KeycardChannel> m_channel;
+    std::shared_ptr<Keycard::CommandSet> m_commandSet;  // Shared command set (maintains secure channel)
     
     // Thread safety
     mutable QMutex m_mutex;

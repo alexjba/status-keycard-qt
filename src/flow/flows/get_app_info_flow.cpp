@@ -29,15 +29,7 @@ QJsonObject GetAppInfoFlow::execute()
         qDebug() << "GetAppInfoFlow: Factory reset requested";
     }
     
-    // 1. Wait for card
-    if (!waitForCard()) {
-        qWarning() << "GetAppInfoFlow: Card wait cancelled";
-        QJsonObject error;
-        error[FlowParams::ERROR_KEY] = "cancelled";
-        return error;
-    }
-    
-    // 2. Select keycard applet
+    // 1. Select keycard applet
     if (!selectKeycard()) {
         qCritical() << "GetAppInfoFlow: Failed to select keycard";
         QJsonObject error;
@@ -45,17 +37,23 @@ QJsonObject GetAppInfoFlow::execute()
         return error;
     }
     
-    // 3. If factory reset requested, execute it BEFORE checking card state
-    if (factoryReset) {
+    // 2. If factory reset requested, execute it BEFORE checking card state
+    if (factoryReset && cardInfo().initialized) {
         qDebug() << "GetAppInfoFlow: Executing factory reset";
         
         // Factory reset does NOT require authentication or PIN
         // (matches status-keycard-go behavior - only requires SELECT)
         
         // Execute factory reset via CommandSet
-        auto* cmdSet = commandSet();
+        auto cmdSet = commandSet();
         if (!cmdSet || !cmdSet->factoryReset()) {
             qWarning() << "GetAppInfoFlow: Factory reset failed:" << (cmdSet ? cmdSet->lastError() : "No CommandSet");
+            QJsonObject error;
+            error[FlowParams::ERROR_KEY] = "factory-reset-failed";
+            return error;
+        }
+
+        if (cardInfo().initialized) {
             QJsonObject error;
             error[FlowParams::ERROR_KEY] = "factory-reset-failed";
             return error;
@@ -63,22 +61,17 @@ QJsonObject GetAppInfoFlow::execute()
         
         qDebug() << "GetAppInfoFlow: Factory reset completed successfully";
         
-        // After factory reset, disconnect and trigger card re-detection
-        // This matches SessionManager::factoryReset() behavior
-        qDebug() << "GetAppInfoFlow: Disconnecting from card";
+        // After factory reset, card session must be reset (all platforms)
+        // On Android: disconnect() stops reader mode, forceScan() restarts it -> fresh IsoDep session
+        // On iOS/PCSC: disconnect() closes connection, forceScan() triggers re-detection
+        qDebug() << "GetAppInfoFlow: Disconnecting and forcing card re-scan (all platforms)";
         channel()->disconnect();
-        
-        qDebug() << "GetAppInfoFlow: Forcing card re-scan after factory reset";
         channel()->forceScan();
-        
-        // Return success - card will be re-detected as pre-initialized (empty)
-        QJsonObject result;
-        result[FlowParams::ERROR_KEY] = "ok";
-        result["factory-reset"] = true;
-        return result;
+
+        selectKeycard();
     }
     
-    // 4. Build basic app info result
+    // 3. Build basic app info result
     QJsonObject appInfo;
     appInfo[FlowParams::INSTANCE_UID] = cardInfo().instanceUID;
     appInfo[FlowParams::KEY_UID] = cardInfo().keyUID;
@@ -96,37 +89,14 @@ QJsonObject GetAppInfoFlow::execute()
     // 4. Try to authenticate (to check if paired)
     //    This may pause for pairing password or PIN
     //    If user cancels, that's OK - we just mark as not paired
-    bool authenticated = openSecureChannelAndAuthenticate(true);
-    
-    if (isCancelled()) {
-        // User cancelled authentication - mark as not paired
-        qDebug() << "GetAppInfoFlow: Authentication cancelled, marking as not paired";
-        result[FlowParams::PAIRED] = false;
-    } else if (authenticated) {
-        // Successfully authenticated
-        qDebug() << "GetAppInfoFlow: Successfully authenticated";
-        result[FlowParams::PAIRED] = true;
-        
-        // Get PIN/PUK retry counts via getStatus
-        auto* cmdSet = commandSet();
-        if (cmdSet) {
-            try {
-                Keycard::ApplicationStatus status = cmdSet->getStatus();
-                result[FlowParams::PIN_RETRIES] = static_cast<int>(status.pinRetryCount);
-                result[FlowParams::PUK_RETRIES] = static_cast<int>(status.pukRetryCount);
-                qDebug() << "GetAppInfoFlow: PIN retries:" << status.pinRetryCount
-                        << "PUK retries:" << status.pukRetryCount;
-            } catch (...) {
-                qWarning() << "GetAppInfoFlow: Failed to get status";
-                // Non-fatal, continue
-            }
-        }
-    } else {
-        // Authentication failed
-        qDebug() << "GetAppInfoFlow: Authentication failed";
-        result[FlowParams::PAIRED] = false;
+    if (!verifyPIN(true)) {
+        QJsonObject error;
+        error[FlowParams::ERROR_KEY] = "auth-failed";
+        error[FlowParams::PAIRED] = false;
+        return error;
     }
     
+    result[FlowParams::PAIRED] = true;
     qDebug() << "GetAppInfoFlow: Execution completed successfully";
     return result;
 }

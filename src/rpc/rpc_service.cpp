@@ -1,5 +1,6 @@
 #include "rpc_service.h"
 #include "../session/session_manager.h"
+#include "../storage/file_pairing_storage.h"
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -14,6 +15,13 @@ RpcService::RpcService(QObject* parent)
 }
 
 RpcService::~RpcService() = default;
+
+void RpcService::setSharedCommandSet(std::shared_ptr<Keycard::CommandSet> commandSet) {
+    qDebug() << "RpcService: Setting shared CommandSet for SessionManager";
+    if (m_sessionManager) {
+        m_sessionManager->setCommandSet(commandSet);
+    }
+}
 
 QString RpcService::processRequest(const QString& requestJson) {
     // Parse the request
@@ -174,8 +182,18 @@ QJsonObject RpcService::handleStart(const QString& id, const QJsonObject& params
     if (storagePath.isEmpty()) {
         return createErrorResponse(id, -32602, "storageFilePath is required");
     }
+    if (!m_sessionManager) {
+        return createErrorResponse(id, -32000, "SessionManager not set");
+    }
+    if (!m_sessionManager->commandSet()) {
+        return createErrorResponse(id, -32000, "CommandSet not set");
+    }
+    auto storage = m_sessionManager->commandSet()->pairingStorage();
+    if (auto fileStorage = std::dynamic_pointer_cast<StatusKeycard::FilePairingStorage>(storage)) {
+        fileStorage->setPath(storagePath);
+    }
     
-    bool success = m_sessionManager->start(storagePath, logEnabled, logFilePath);
+    bool success = m_sessionManager->start(logEnabled, logFilePath);
     if (!success) {
         return createErrorResponse(id, -32000, m_sessionManager->lastError());
     }

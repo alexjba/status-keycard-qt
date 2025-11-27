@@ -30,15 +30,7 @@ QJsonObject RecoverAccountFlow::execute()
 {
     qDebug() << "RecoverAccountFlow: Starting execution";
     
-    // 1. Wait for card
-    if (!waitForCard()) {
-        qWarning() << "RecoverAccountFlow: Card wait cancelled";
-        QJsonObject error;
-        error[FlowParams::ERROR_KEY] = "cancelled";
-        return error;
-    }
-    
-    // 2. Select keycard applet
+    // 1. Select keycard applet
     if (!selectKeycard()) {
         qCritical() << "RecoverAccountFlow: Failed to select keycard";
         QJsonObject error;
@@ -46,7 +38,7 @@ QJsonObject RecoverAccountFlow::execute()
         return error;
     }
     
-    // 3. Check card has keys
+    // 2. Check card has keys
     if (!requireKeys()) {
         qWarning() << "RecoverAccountFlow: Card has no keys";
         QJsonObject error;
@@ -54,15 +46,14 @@ QJsonObject RecoverAccountFlow::execute()
         return error;
     }
     
-    // 4. Open secure channel and authenticate (verify PIN)
-    if (!openSecureChannelAndAuthenticate(true)) {
-        qCritical() << "RecoverAccountFlow: Authentication failed";
+    // 3. Open secure channel and authenticate (verify PIN)
+    if (!verifyPIN()) {
         QJsonObject error;
         error[FlowParams::ERROR_KEY] = "auth-failed";
         return error;
     }
     
-    // 5. Export encryption key (with private key)
+    // 6. Export encryption key (with private key)
     qDebug() << "RecoverAccountFlow: Exporting encryption key...";
     QJsonObject encKey = exportKey(ENCRYPTION_PATH, true);
     if (encKey.isEmpty()) {
@@ -72,7 +63,7 @@ QJsonObject RecoverAccountFlow::execute()
         return error;
     }
     
-    // 6. Export whisper key (with private key)
+    // 7. Export whisper key (with private key)
     qDebug() << "RecoverAccountFlow: Exporting whisper key...";
     QJsonObject whisperKey = exportKey(WHISPER_PATH, true);
     if (whisperKey.isEmpty()) {
@@ -82,7 +73,7 @@ QJsonObject RecoverAccountFlow::execute()
         return error;
     }
     
-    // 7. Export EIP1581 key (public only)
+    // 8. Export EIP1581 key (public only)
     qDebug() << "RecoverAccountFlow: Exporting EIP1581 key...";
     QJsonObject eip1581Key = exportKey(EIP1581_PATH, false);
     if (eip1581Key.isEmpty()) {
@@ -92,7 +83,7 @@ QJsonObject RecoverAccountFlow::execute()
         return error;
     }
     
-    // 8. Export wallet root key (extended public - for now just public)
+    // 9. Export wallet root key (extended public - for now just public)
     qDebug() << "RecoverAccountFlow: Exporting wallet root key...";
     QJsonObject walletRootKey = exportKey(WALLET_ROOT_PATH, false);
     if (walletRootKey.isEmpty()) {
@@ -102,7 +93,7 @@ QJsonObject RecoverAccountFlow::execute()
         return error;
     }
     
-    // 9. Export wallet key (public only)
+    // 10. Export wallet key (public only)
     qDebug() << "RecoverAccountFlow: Exporting wallet key...";
     QJsonObject walletKey = exportKey(WALLET_PATH, false);
     if (walletKey.isEmpty()) {
@@ -112,7 +103,7 @@ QJsonObject RecoverAccountFlow::execute()
         return error;
     }
     
-    // 10. Export master key (public only)
+    // 11. Export master key (public only)
     qDebug() << "RecoverAccountFlow: Exporting master key...";
     QJsonObject masterKey = exportKey(MASTER_PATH, false);
     if (masterKey.isEmpty()) {
@@ -122,7 +113,7 @@ QJsonObject RecoverAccountFlow::execute()
         return error;
     }
     
-    // 11. Build result
+    // 12. Build result
     QJsonObject result = buildCardInfoJson();
     result[FlowParams::ENC_KEY] = encKey;
     result[FlowParams::WHISPER_KEY] = whisperKey;
@@ -147,7 +138,7 @@ QJsonObject RecoverAccountFlow::exportKey(const QString& path, bool includePriva
     }
     
     // Get command set from FlowBase
-    auto* cmdSet = commandSet();
+    auto cmdSet = commandSet();
     if (!cmdSet) {
         qCritical() << "RecoverAccountFlow: No command set available!";
         return QJsonObject();
@@ -168,28 +159,21 @@ QJsonObject RecoverAccountFlow::exportKey(const QString& path, bool includePriva
     
     qDebug() << "RecoverAccountFlow: Exported key, data size:" << keyData.size();
     
-    // Parse key data
-    QJsonObject keyPair;
+    // Parse TLV-encoded key data
+    QByteArray publicKey, privateKey;
+    if (!parseExportedKey(keyData, publicKey, privateKey)) {
+        qCritical() << "RecoverAccountFlow: Failed to parse exported key data";
+        return QJsonObject();
+    }
     
-    if (includePrivate && keyData.size() >= 97) {
-        // Public key (65 bytes uncompressed)
-        QByteArray publicKey = keyData.left(65);
-        keyPair["publicKey"] = QString("0x") + publicKey.toHex();
-        
-        // Private key (32 bytes)
-        QByteArray privateKey = keyData.mid(65, 32);
+    QJsonObject keyPair;
+    keyPair["publicKey"] = QString("0x") + publicKey.toHex();
+    keyPair["address"] = FlowBase::publicKeyToAddress(publicKey);
+    
+    if (includePrivate && !privateKey.isEmpty()) {
         keyPair["privateKey"] = QString("0x") + privateKey.toHex();
-        
-        keyPair["address"] = "";
-        
-    } else if (!includePrivate && keyData.size() >= 65) {
-        // Public key only
-        QByteArray publicKey = keyData.left(65);
-        keyPair["publicKey"] = QString("0x") + publicKey.toHex();
-        keyPair["address"] = "";
-        
-    } else {
-        qCritical() << "RecoverAccountFlow: Invalid key data size:" << keyData.size();
+    } else if (includePrivate) {
+        qCritical() << "RecoverAccountFlow: Private key requested but not found";
         return QJsonObject();
     }
     

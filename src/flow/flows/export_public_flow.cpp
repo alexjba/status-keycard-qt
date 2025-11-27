@@ -4,6 +4,7 @@
 #include "../flow_signals.h"
 #include <keycard-qt/command_set.h>
 #include <QJsonArray>
+#include <QCryptographicHash>
 
 namespace StatusKeycard {
 
@@ -12,13 +13,13 @@ ExportPublicFlow::ExportPublicFlow(FlowManager* mgr, const QJsonObject& params, 
 
 QJsonObject ExportPublicFlow::execute()
 {
-    if (!waitForCard() || !selectKeycard() || !requireKeys()) {
+    if (!selectKeycard() || !requireKeys()) {
         QJsonObject error;
         error[FlowParams::ERROR_KEY] = "card-error";
         return error;
     }
     
-    if (!openSecureChannelAndAuthenticate(true)) {
+    if (!verifyPIN()) {
         QJsonObject error;
         error[FlowParams::ERROR_KEY] = "auth-failed";
         return error;
@@ -44,7 +45,8 @@ QJsonObject ExportPublicFlow::execute()
     }
     
     if (paths.isEmpty()) {
-        pauseAndWait(FlowSignals::ENTER_PATH, "enter-bip44-path");
+        // Request BIP44 path (empty error = normal request)
+        pauseAndWait(FlowSignals::ENTER_PATH, "");
         if (isCancelled()) {
             QJsonObject error;
             error[FlowParams::ERROR_KEY] = "cancelled";
@@ -72,9 +74,17 @@ QJsonObject ExportPublicFlow::execute()
             return error;
         }
         
+        QByteArray publicKey, privateKey;
+        if (!parseExportedKey(keyData, publicKey, privateKey)) {
+            QJsonObject error;
+            error[FlowParams::ERROR_KEY] = "parse-key-failed";
+            return error;
+        }
+        
         QJsonObject keyPair;
-        keyPair["publicKey"] = QString("0x") + keyData.left(65).toHex();
-        keyPair["address"] = "";
+        keyPair["publicKey"] = QString("0x") + publicKey.toHex();
+        keyPair["address"] = FlowBase::publicKeyToAddress(publicKey);
+        
         exportedKeys.append(keyPair);
     }
     

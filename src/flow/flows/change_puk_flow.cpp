@@ -11,13 +11,13 @@ ChangePUKFlow::ChangePUKFlow(FlowManager* mgr, const QJsonObject& params, QObjec
 
 QJsonObject ChangePUKFlow::execute()
 {
-    if (!waitForCard() || !selectKeycard()) {
+    if (!selectKeycard()) {
         QJsonObject error;
         error[FlowParams::ERROR_KEY] = "card-error";
         return error;
     }
     
-    if (!openSecureChannelAndAuthenticate(true)) {
+    if (!verifyPIN()) {
         QJsonObject error;
         error[FlowParams::ERROR_KEY] = "auth-failed";
         return error;
@@ -25,7 +25,8 @@ QJsonObject ChangePUKFlow::execute()
     
     QString newPUK = params()[FlowParams::NEW_PUK].toString();
     if (newPUK.isEmpty()) {
-        pauseAndWait(FlowSignals::ENTER_NEW_PUK, "enter-new-puk");
+        // Request new PUK (empty error = normal request)
+        pauseAndWait(FlowSignals::ENTER_NEW_PUK, "changing-credentials");
         if (isCancelled()) {
             QJsonObject error;
             error[FlowParams::ERROR_KEY] = "cancelled";

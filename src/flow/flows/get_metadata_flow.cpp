@@ -62,22 +62,6 @@ GetMetadataFlow::GetMetadataFlow(FlowManager* mgr, const QJsonObject& params, QO
 
 QJsonObject GetMetadataFlow::execute()
 {
-    if (!waitForCard() || !selectKeycard()) {
-        QJsonObject error;
-        error[FlowParams::ERROR_KEY] = "card-error";
-        return error;
-    }
-    
-    // Open secure channel (required for getData to work!)
-    // Do NOT authenticate yet - just open channel
-    qDebug() << "GetMetadataFlow: Opening secure channel for metadata read";
-    if (!openSecureChannelAndAuthenticate(false)) {  // false = don't verify PIN yet
-        qWarning() << "GetMetadataFlow: Failed to open secure channel";
-        QJsonObject error;
-        error[FlowParams::ERROR_KEY] = "secure-channel-failed";
-        return error;
-    }
-    
     // Get metadata from card (matching status-keycard-go)
     qDebug() << "GetMetadataFlow: Getting metadata from card";
     QByteArray metadataData = commandSet()->getData(Keycard::APDU::P1StoreDataPublic);  // 0x00
@@ -109,8 +93,8 @@ QJsonObject GetMetadataFlow::execute()
         return result;
     }
     
-    // Parse metadata using Go's custom binary format (NOT TLV!)
-    // Format (from keycard-go/types/metadata.go ParseMetadata):
+    // Parse metadata using Go's custom binary format (matching types/metadata.go ParseMetadata())
+    // Format: [version+namelen][name][start/count pairs in LEB128]
     //   Byte 0: version (3 bits) + name length (5 bits)
     //   Bytes 1..namelen: card name
     //   Remaining: series of start/count LEB128 pairs for wallet paths
@@ -209,8 +193,7 @@ QJsonObject GetMetadataFlow::execute()
         
         // Authenticate ONCE (will pause for PIN if needed - matching Go behavior)
         qDebug() << "GetMetadataFlow: Authenticating for address resolution";
-        if (!openSecureChannelAndAuthenticate(true)) {  // true = verify PIN (will pause if not in params)
-            qWarning() << "GetMetadataFlow: Failed to authenticate for address resolution";
+        if (!verifyPIN()) {
             QJsonObject error;
             error[FlowParams::ERROR_KEY] = "auth-failed";
             return error;
@@ -332,6 +315,7 @@ QJsonObject GetMetadataFlow::execute()
                 if (publicKey.size() == 65 && static_cast<uint8_t>(publicKey[0]) == 0x04) {
                     // Store hex-encoded public key
                     wallet["publicKey"] = QString::fromLatin1(publicKey.toHex());
+                    wallet["address"] = FlowBase::publicKeyToAddress(publicKey);
                     
                     // Store hex-encoded private key (if present) - marked as omitempty in Go
                     if (!privateKey.isEmpty()) {
@@ -345,16 +329,8 @@ QJsonObject GetMetadataFlow::execute()
                         qDebug() << "GetMetadataFlow: Chain code:" << chainCode.toHex();
                     }
                     
-                    // Derive Ethereum address from public key (matching status-keycard-go)
-                    // Address = last 20 bytes of Keccak256(publicKey[1:])
-                    QByteArray pubKeyData = publicKey.mid(1);  // Remove 0x04 prefix
-                    QByteArray hash = QCryptographicHash::hash(pubKeyData, QCryptographicHash::Keccak_256);
-                    QByteArray addressBytes = hash.right(20);  // Last 20 bytes
-                    QString address = QString("0x") + addressBytes.toHex();
-                    wallet["address"] = address;
-                    
                     qDebug() << "GetMetadataFlow: Public key:" << publicKey.toHex();
-                    qDebug() << "GetMetadataFlow: Derived address:" << address;
+                    qDebug() << "GetMetadataFlow: Derived address:" << wallet["address"].toString();
                 } else {
                     qWarning() << "GetMetadataFlow: Invalid public key format, size=" << publicKey.size();
                 }

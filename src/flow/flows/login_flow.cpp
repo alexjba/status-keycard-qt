@@ -27,15 +27,7 @@ QJsonObject LoginFlow::execute()
 {
     qDebug() << "LoginFlow: Starting execution";
     
-    // 1. Wait for card
-    if (!waitForCard()) {
-        qWarning() << "LoginFlow: Card wait cancelled";
-        QJsonObject error;
-        error[FlowParams::ERROR_KEY] = "cancelled";
-        return error;
-    }
-    
-    // 2. Select keycard applet
+    // 1. Select keycard applet
     if (!selectKeycard()) {
         qCritical() << "LoginFlow: Failed to select keycard";
         QJsonObject error;
@@ -43,7 +35,7 @@ QJsonObject LoginFlow::execute()
         return error;
     }
     
-    // 3. Check card has keys
+    // 2. Check card has keys
     if (!requireKeys()) {
         qWarning() << "LoginFlow: Card has no keys";
         QJsonObject error;
@@ -51,15 +43,14 @@ QJsonObject LoginFlow::execute()
         return error;
     }
     
-    // 4. Open secure channel and authenticate (verify PIN)
-    if (!openSecureChannelAndAuthenticate(true)) {
-        qCritical() << "LoginFlow: Authentication failed";
+    // 3. Open secure channel and authenticate (verify PIN)
+    if (!verifyPIN()) {
         QJsonObject error;
         error[FlowParams::ERROR_KEY] = "auth-failed";
         return error;
     }
     
-    // 5. Export encryption key (with private key)
+    // 4. Export encryption key (with private key)
     qDebug() << "LoginFlow: Exporting encryption key...";
     QJsonObject encKey = exportKey(ENCRYPTION_PATH, true);
     if (encKey.isEmpty()) {
@@ -69,7 +60,7 @@ QJsonObject LoginFlow::execute()
         return error;
     }
     
-    // 6. Export whisper key (with private key)
+    // 5. Export whisper key (with private key)
     qDebug() << "LoginFlow: Exporting whisper key...";
     QJsonObject whisperKey = exportKey(WHISPER_PATH, true);
     if (whisperKey.isEmpty()) {
@@ -79,7 +70,7 @@ QJsonObject LoginFlow::execute()
         return error;
     }
     
-    // 7. Build result
+    // 6. Build result
     QJsonObject result = buildCardInfoJson();
     result[FlowParams::ENC_KEY] = encKey;
     result[FlowParams::WHISPER_KEY] = whisperKey;
@@ -100,7 +91,7 @@ QJsonObject LoginFlow::exportKey(const QString& path, bool includePrivate)
     }
     
     // Get command set from FlowBase
-    auto* cmdSet = commandSet();
+    auto cmdSet = commandSet();
     if (!cmdSet) {
         qCritical() << "LoginFlow: No command set available!";
         return QJsonObject();
@@ -123,40 +114,27 @@ QJsonObject LoginFlow::exportKey(const QString& path, bool includePrivate)
     qDebug() << "LoginFlow: Exported key, data size:" << keyData.size();
     
     // Parse key data
-    // Format depends on export type
-    // For P2ExportKeyPrivateAndPublic: 65 bytes public + 32 bytes private
-    // For P2ExportKeyPublicOnly: 65 bytes public
+    // Parse TLV-encoded key data
+    QByteArray publicKey, privateKey;
+    if (!parseExportedKey(keyData, publicKey, privateKey)) {
+        qCritical() << "LoginFlow: Failed to parse exported key data";
+        return QJsonObject();
+    }
     
     QJsonObject keyPair;
+    keyPair["publicKey"] = QString("0x") + publicKey.toHex();
+    keyPair["address"] = FlowBase::publicKeyToAddress(publicKey);
     
-    if (includePrivate && keyData.size() >= 97) {
-        // Public key (65 bytes uncompressed)
-        QByteArray publicKey = keyData.left(65);
-        keyPair["publicKey"] = QString("0x") + publicKey.toHex();
-        
-        // Private key (32 bytes)
-        QByteArray privateKey = keyData.mid(65, 32);
+    if (includePrivate && !privateKey.isEmpty()) {
         keyPair["privateKey"] = QString("0x") + privateKey.toHex();
-        
-        // Derive address from public key (last 20 bytes of keccak256 hash)
-        // For now, we'll skip address derivation and just export keys
-        // TODO: Implement proper address derivation with keccak256
-        keyPair["address"] = "";
-        
-    } else if (!includePrivate && keyData.size() >= 65) {
-        // Public key only
-        QByteArray publicKey = keyData.left(65);
-        keyPair["publicKey"] = QString("0x") + publicKey.toHex();
-        keyPair["address"] = "";
-        
-    } else {
-        qCritical() << "LoginFlow: Invalid key data size:" << keyData.size()
-                   << "expected:" << (includePrivate ? 97 : 65);
+    } else if (includePrivate) {
+        qCritical() << "LoginFlow: Private key requested but not found in exported data";
         return QJsonObject();
     }
     
     qDebug() << "LoginFlow: Key exported successfully";
     qDebug() << "  Public key:" << keyPair["publicKey"].toString().left(20) << "...";
+    qDebug() << "  Address:" << keyPair["address"].toString();
     if (includePrivate) {
         qDebug() << "  Private key:" << keyPair["privateKey"].toString().left(20) << "...";
     }

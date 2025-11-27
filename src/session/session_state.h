@@ -26,7 +26,8 @@ enum class SessionState {
     Ready,                   // "ready"
     Authorized,              // "authorized"
     FactoryResetting,        // "factory-resetting"
-    InternalError            // "internal-error"
+    InternalError,            // "internal-error"
+    NoAvailablePairingSlots,  // "no-available-pairing-slots"
 };
 
 inline QString sessionStateToString(SessionState state) {
@@ -47,6 +48,7 @@ inline QString sessionStateToString(SessionState state) {
         case SessionState::Authorized:            return "authorized";
         case SessionState::FactoryResetting:      return "factory-resetting";
         case SessionState::InternalError:         return "internal-error";
+        case SessionState::NoAvailablePairingSlots: return "no-available-pairing-slots";
     }
     return "unknown-reader-state";
 }

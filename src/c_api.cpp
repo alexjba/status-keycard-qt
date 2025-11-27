@@ -3,6 +3,8 @@
 #include "session/session_manager.h"
 #include "signal_manager.h"
 #include "flow/flow_manager.h"
+#include "storage/file_pairing_storage.h"
+#include "storage/secure_pairing_storage.h"
 #include <QCoreApplication>
 #include <QString>
 #include <QObject>
@@ -23,10 +25,13 @@ struct StatusKeycardContextImpl {
     std::unique_ptr<StatusKeycard::RpcService> rpcService;
     StatusKeycard::SignalManager* signalManager;
     SignalCallback signalCallback;
+    std::shared_ptr<Keycard::CommandSet> sharedCommandSet;  // Shared between FlowManager and SessionManager
+    std::shared_ptr<Keycard::IPairingStorage> pairingStorage;
     
     StatusKeycardContextImpl()
         : app(nullptr)
         , signalCallback(nullptr)
+        , sharedCommandSet(nullptr)
     {
         // Initialize Qt if needed
         int argc = 0;
@@ -35,8 +40,22 @@ struct StatusKeycardContextImpl {
             app = new QCoreApplication(argc, argv);
         }
         
+        auto channel = std::make_shared<Keycard::KeycardChannel>();
+        
+// #if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
+//         pairingStorage = std::make_shared<StatusKeycard::SecurePairingStorage>();
+//         qDebug() << "C API: Using SecurePairingStorage";
+// #else
+        pairingStorage = std::make_shared<StatusKeycard::FilePairingStorage>();
+//         qDebug() << "C API: Using FilePairingStorage";
+// #endif
+
+        // Get CommandSet from FlowManager
+        sharedCommandSet = std::make_shared<Keycard::CommandSet>(channel, pairingStorage, [](const QString& cardUID) { return "KeycardDefaultPairing"; });
+        
         // Create RPC service
         rpcService = std::make_unique<StatusKeycard::RpcService>();
+        rpcService->setSharedCommandSet(sharedCommandSet);
         
         // Get signal manager instance
         signalManager = StatusKeycard::SignalManager::instance();
@@ -198,19 +217,19 @@ char* KeycardInitFlowWithContext(StatusKeycardContext ctx, const char* storageDi
         return strdup(error);
     }
     
+    StatusKeycardContextImpl* impl = reinterpret_cast<StatusKeycardContextImpl*>(ctx);
+    
     // Initialize FlowManager with storage directory
-    bool success = StatusKeycard::FlowManager::instance()->init(QString::fromUtf8(storageDir));
+    if (auto fileStorage = std::dynamic_pointer_cast<StatusKeycard::FilePairingStorage>(impl->pairingStorage)) {
+        fileStorage->setPath(QString::fromUtf8(storageDir));
+    }
+    bool success = StatusKeycard::FlowManager::instance()->init(impl->sharedCommandSet);
     
     if (!success) {
         const char* error = R"({"success": false, "error": "Failed to initialize FlowManager"})";
         return strdup(error);
     }
     
-    // Start continuous card detection (matching status-keycard-go behavior)
-    // Detection runs continuously until app shutdown, NOT per-flow
-    qDebug() << "C API: Starting continuous card detection...";
-    StatusKeycard::FlowManager::instance()->startContinuousDetection();
-    qDebug() << "C API: Continuous detection started";
     
     const char* response = R"({"success": true})";
     return strdup(response);

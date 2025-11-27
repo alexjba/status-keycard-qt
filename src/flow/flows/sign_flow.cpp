@@ -126,13 +126,13 @@ QJsonObject SignFlow::execute()
 {
     qDebug() << "SignFlow: Starting";
     
-    if (!waitForCard() || !selectKeycard() || !requireKeys()) {
+    if (!selectKeycard() || !requireKeys()) {
         QJsonObject error;
         error[FlowParams::ERROR_KEY] = "card-error";
         return error;
     }
     
-    if (!openSecureChannelAndAuthenticate(true)) {
+    if (!verifyPIN()) {
         QJsonObject error;
         error[FlowParams::ERROR_KEY] = "auth-failed";
         return error;
@@ -141,7 +141,8 @@ QJsonObject SignFlow::execute()
     // Get tx hash
     QString txHash = params()[FlowParams::TX_HASH].toString();
     if (txHash.isEmpty()) {
-        pauseAndWait(FlowSignals::ENTER_TX_HASH, "enter-tx-hash");
+        // Request transaction hash (empty error = normal request)
+        pauseAndWait(FlowSignals::ENTER_TX_HASH, "");
         if (isCancelled()) {
             QJsonObject error;
             error[FlowParams::ERROR_KEY] = "cancelled";
@@ -153,7 +154,8 @@ QJsonObject SignFlow::execute()
     // Get path
     QString path = params()[FlowParams::BIP44_PATH].toString();
     if (path.isEmpty()) {
-        pauseAndWait(FlowSignals::ENTER_PATH, "enter-bip44-path");
+        // Request BIP44 path (empty error = normal request)
+        pauseAndWait(FlowSignals::ENTER_PATH, "");
         if (isCancelled()) {
             QJsonObject error;
             error[FlowParams::ERROR_KEY] = "cancelled";
@@ -163,7 +165,7 @@ QJsonObject SignFlow::execute()
     }
     
     // Sign with the specified path - use the full response version to get TLV data
-    auto* cmdSet = commandSet();
+    auto cmdSet = commandSet();
     QByteArray hashBytes = QByteArray::fromHex(txHash.toLatin1());
     QByteArray tlvResponse = cmdSet->signWithPathFullResponse(hashBytes, path);
     

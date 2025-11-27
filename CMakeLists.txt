@@ -104,6 +104,7 @@ set(SOURCES
     src/c_api.cpp
     src/session/session_manager.cpp
     src/storage/pairing_storage.cpp
+    src/storage/file_pairing_storage.cpp
     src/signal_manager.cpp
     src/rpc/rpc_service.cpp
     # Flow API
@@ -125,14 +126,22 @@ set(SOURCES
     src/flow/flows/store_metadata_flow.cpp
 )
 
-# Add Android-specific JNI bridge
 if(ANDROID)
-    list(APPEND SOURCES src/android_nfc_bridge.cpp)
-    message(STATUS "Adding Android NFC JNI bridge")
+    list(APPEND SOURCES 
+        src/android_nfc_bridge.cpp
+    )
 endif()
 
 # Create library (shared or static based on BUILD_SHARED_LIBS)
 add_library(status-keycard-qt ${SOURCES})
+
+# CRITICAL: For Android builds, ensure the NFC JAR is built and published BEFORE
+# this library is built, so the Android app can resolve the Maven dependency
+if(ANDROID AND TARGET android-nfc-jar)
+    add_dependencies(status-keycard-qt android-nfc-jar)
+    message(STATUS "Added dependency: status-keycard-qt -> android-nfc-jar")
+    message(STATUS "  JAR will be published to Maven Local before library build")
+endif()
 
 target_include_directories(status-keycard-qt
     PUBLIC
@@ -150,6 +159,66 @@ target_link_libraries(status-keycard-qt
     PRIVATE
         keycard-qt  # Linked privately so it's absorbed into libstatus-keycard-qt
 )
+
+# When building as a static library, bundle keycard-qt into status-keycard-qt
+# This ensures consumers only need to link against status-keycard-qt
+if(NOT BUILD_SHARED_LIBS)
+    message(STATUS "Building status-keycard-qt as STATIC library - bundling keycard-qt")
+    
+    # Use a custom command to combine the static libraries after build
+    # This is platform-specific:
+    # - On Unix/macOS: Use ar or libtool
+    # - On Windows: Use lib.exe
+    
+    if(APPLE)
+        # On macOS and iOS, use libtool to combine static libraries
+        add_custom_command(TARGET status-keycard-qt POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E echo "Bundling keycard-qt into status-keycard-qt..."
+            COMMAND libtool -static -o 
+                $<TARGET_FILE:status-keycard-qt>.tmp
+                $<TARGET_FILE:status-keycard-qt>
+                $<TARGET_FILE:keycard-qt>
+            COMMAND ${CMAKE_COMMAND} -E rename
+                $<TARGET_FILE:status-keycard-qt>.tmp
+                $<TARGET_FILE:status-keycard-qt>
+            COMMENT "Combining static libraries using libtool (macOS/iOS)"
+            VERBATIM
+        )
+    elseif(MSVC)
+        # On Windows with MSVC, use lib.exe
+        add_custom_command(TARGET status-keycard-qt POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E echo "Bundling keycard-qt into status-keycard-qt..."
+            COMMAND lib.exe /OUT:$<TARGET_FILE:status-keycard-qt>.tmp
+                $<TARGET_FILE:status-keycard-qt>
+                $<TARGET_FILE:keycard-qt>
+            COMMAND ${CMAKE_COMMAND} -E rename
+                $<TARGET_FILE:status-keycard-qt>.tmp
+                $<TARGET_FILE:status-keycard-qt>
+            COMMENT "Combining static libraries using lib.exe (MSVC)"
+            VERBATIM
+        )
+    else()
+        # On Linux, Android, Windows MinGW, and other Unix-like systems, use ar with MRI script
+        # This covers: Linux, Android NDK, MinGW/MSYS2, Cygwin, etc.
+        add_custom_command(TARGET status-keycard-qt POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E echo "Bundling keycard-qt into status-keycard-qt..."
+            COMMAND ${CMAKE_COMMAND} -E echo "CREATE $<TARGET_FILE:status-keycard-qt>.tmp" > ${CMAKE_CURRENT_BINARY_DIR}/combine.mri
+            COMMAND ${CMAKE_COMMAND} -E echo "ADDLIB $<TARGET_FILE:status-keycard-qt>" >> ${CMAKE_CURRENT_BINARY_DIR}/combine.mri
+            COMMAND ${CMAKE_COMMAND} -E echo "ADDLIB $<TARGET_FILE:keycard-qt>" >> ${CMAKE_CURRENT_BINARY_DIR}/combine.mri
+            COMMAND ${CMAKE_COMMAND} -E echo "SAVE" >> ${CMAKE_CURRENT_BINARY_DIR}/combine.mri
+            COMMAND ${CMAKE_COMMAND} -E echo "END" >> ${CMAKE_CURRENT_BINARY_DIR}/combine.mri
+            COMMAND ${CMAKE_AR} -M < ${CMAKE_CURRENT_BINARY_DIR}/combine.mri
+            COMMAND ${CMAKE_COMMAND} -E rename
+                $<TARGET_FILE:status-keycard-qt>.tmp
+                $<TARGET_FILE:status-keycard-qt>
+            COMMENT "Combining static libraries using ar (Linux/Android/MinGW)"
+            VERBATIM
+        )
+    endif()
+    
+    # Ensure keycard-qt is built before we try to bundle it
+    add_dependencies(status-keycard-qt keycard-qt)
+endif()
 
 # Link PC/SC framework on Apple platforms (desktop only, not iOS)
 # This is needed because keycard-qt uses PC/SC on desktop and links it privately
@@ -268,5 +337,12 @@ message(STATUS "Version: ${PROJECT_VERSION}")
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Build testing: ${BUILD_TESTING}")
 message(STATUS "Build examples: ${BUILD_EXAMPLES}")
+if(BUILD_SHARED_LIBS)
+    message(STATUS "Library type: SHARED")
+    message(STATUS "keycard-qt bundling: N/A (shared library)")
+else()
+    message(STATUS "Library type: STATIC")
+    message(STATUS "keycard-qt bundling: ENABLED (combined into single archive)")
+endif()
 message(STATUS "Qt6 version: ${Qt6_VERSION}")
 message(STATUS "keycard-qt location: ${KEYCARD_QT_DIR}")

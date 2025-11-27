@@ -11,13 +11,7 @@ ChangePINFlow::ChangePINFlow(FlowManager* mgr, const QJsonObject& params, QObjec
 
 QJsonObject ChangePINFlow::execute()
 {
-    if (!waitForCard() || !selectKeycard()) {
-        QJsonObject error;
-        error[FlowParams::ERROR_KEY] = "card-error";
-        return error;
-    }
-    
-    if (!openSecureChannelAndAuthenticate(true)) {
+    if (!verifyPIN()) {
         QJsonObject error;
         error[FlowParams::ERROR_KEY] = "auth-failed";
         return error;
@@ -25,7 +19,8 @@ QJsonObject ChangePINFlow::execute()
     
     QString newPIN = params()[FlowParams::NEW_PIN].toString();
     if (newPIN.isEmpty()) {
-        pauseAndWait(FlowSignals::ENTER_NEW_PIN, "enter-new-pin");
+        // Request new PIN (empty error means normal request, not an error condition)
+        pauseAndWait(FlowSignals::ENTER_NEW_PIN, "changing-credentials");
         if (isCancelled()) {
             QJsonObject error;
             error[FlowParams::ERROR_KEY] = "cancelled";
