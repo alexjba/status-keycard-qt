@@ -43,6 +43,9 @@ public:
     void stopDetection() override;
     void disconnect() override;
     QString backendName() const override { return "Mock Backend"; }
+    void setState(Keycard::ChannelState state) override;
+    Keycard::ChannelState state() const override { return m_channelState; }
+    void forceScan() override;
     
 private:
     // Simulation state
@@ -59,6 +62,7 @@ private:
     int m_pinRetries;
     int m_pukRetries;
     QTimer* m_autoConnectTimer;
+    Keycard::ChannelState m_channelState;
     
     // APDU response generators
     QByteArray generateSelectResponse();

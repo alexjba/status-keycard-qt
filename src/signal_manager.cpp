@@ -114,6 +114,21 @@ void SignalManager::emitSignal(const QString& jsonSignal)
     sendSignal(jsonSignal);
 }
 
+void SignalManager::emitChannelStateChanged(const QString& state)
+{
+    QJsonObject event;
+    event["state"] = state;
+    
+    QJsonObject signal;
+    signal["type"] = "channel-state-changed";
+    signal["event"] = event;
+    
+    QJsonDocument doc(signal);
+    QString jsonString = QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
+    
+    sendSignal(jsonString);
+}
+
 void SignalManager::sendSignal(const QString& jsonSignal)
 {
     if (!m_callback) {

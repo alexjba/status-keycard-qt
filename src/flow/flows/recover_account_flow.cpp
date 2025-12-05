@@ -18,12 +18,10 @@ const QString RecoverAccountFlow::MASTER_PATH = "m";
 RecoverAccountFlow::RecoverAccountFlow(FlowManager* manager, const QJsonObject& params, QObject* parent)
     : FlowBase(manager, FlowType::RecoverAccount, params, parent)
 {
-    qDebug() << "RecoverAccountFlow: Created";
 }
 
 RecoverAccountFlow::~RecoverAccountFlow()
 {
-    qDebug() << "RecoverAccountFlow: Destroyed";
 }
 
 QJsonObject RecoverAccountFlow::execute()
@@ -127,10 +125,7 @@ QJsonObject RecoverAccountFlow::execute()
 }
 
 QJsonObject RecoverAccountFlow::exportKey(const QString& path, bool includePrivate)
-{
-    qDebug() << "RecoverAccountFlow: Exporting key at path:" << path 
-             << "includePrivate:" << includePrivate;
-    
+{   
     // Check if cancelled
     if (isCancelled()) {
         qWarning() << "RecoverAccountFlow: Export cancelled";
@@ -156,8 +151,6 @@ QJsonObject RecoverAccountFlow::exportKey(const QString& path, bool includePriva
         qCritical() << "RecoverAccountFlow: Export key returned empty data!";
         return QJsonObject();
     }
-    
-    qDebug() << "RecoverAccountFlow: Exported key, data size:" << keyData.size();
     
     // Parse TLV-encoded key data
     QByteArray publicKey, privateKey;

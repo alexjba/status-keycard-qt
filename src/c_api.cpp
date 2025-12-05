@@ -4,8 +4,6 @@
 #include "signal_manager.h"
 #include "flow/flow_manager.h"
 #include "storage/file_pairing_storage.h"
-#include "storage/secure_pairing_storage.h"
-#include <QCoreApplication>
 #include <QString>
 #include <QObject>
 #include <QThread>
@@ -14,33 +12,25 @@
 #include <memory>
 #include <cstring>
 
-// Forward declare Android JNI bridge setup function
-#ifdef Q_OS_ANDROID
-extern "C" void android_nfc_bridge_set_rpc_service(void* rpcService);
-#endif
-
 // Context structure
 struct StatusKeycardContextImpl {
-    QCoreApplication* app;
     std::unique_ptr<StatusKeycard::RpcService> rpcService;
     StatusKeycard::SignalManager* signalManager;
     SignalCallback signalCallback;
     std::shared_ptr<Keycard::CommandSet> sharedCommandSet;  // Shared between FlowManager and SessionManager
+    std::shared_ptr<Keycard::KeycardChannel> channel;  // Global channel instance
     std::shared_ptr<Keycard::IPairingStorage> pairingStorage;
     
     StatusKeycardContextImpl()
-        : app(nullptr)
-        , signalCallback(nullptr)
+        : signalCallback(nullptr)
         , sharedCommandSet(nullptr)
     {
+        qDebug() << "StatusKeycardContextImpl: Constructor called";
         // Initialize Qt if needed
         int argc = 0;
         char* argv[] = {nullptr};
-        if (!QCoreApplication::instance()) {
-            app = new QCoreApplication(argc, argv);
-        }
         
-        auto channel = std::make_shared<Keycard::KeycardChannel>();
+        channel = std::make_shared<Keycard::KeycardChannel>();
         
 // #if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
 //         pairingStorage = std::make_shared<StatusKeycard::SecurePairingStorage>();
@@ -82,15 +72,34 @@ struct StatusKeycardContextImpl {
             signalManager->emitSignal(jsonString);
         });
         
-#ifdef Q_OS_ANDROID
-        // Register RpcService with Android JNI bridge for NFC foreground dispatch
-        android_nfc_bridge_set_rpc_service(rpcService.get());
-        qDebug() << "StatusKeycardContextImpl: Android JNI bridge initialized";
-#endif
+        // Connect channel state changes to SignalManager
+        QObject::connect(channel.get(), &Keycard::KeycardChannel::channelStateChanged, signalManager,
+                        [this](Keycard::ChannelOperationalState state) {
+            // Convert enum to string
+            qDebug() << "StatusKeycardContextImpl: Channel state changed:" << static_cast<int>(state);
+            QString stateStr;
+            switch (state) {
+                case Keycard::ChannelOperationalState::Idle:
+                    stateStr = "idle";
+                    break;
+                case Keycard::ChannelOperationalState::WaitingForKeycard:
+                    stateStr = "waiting-for-keycard";
+                    break;
+                case Keycard::ChannelOperationalState::Reading:
+                    stateStr = "reading";
+                    break;
+                case Keycard::ChannelOperationalState::Error:
+                    stateStr = "error";
+                    break;
+            }
+            qDebug() << "StatusKeycardContextImpl: Emitting channel state changed signal:" << stateStr;
+            signalManager->emitChannelStateChanged(stateStr);
+        });
+
     }
     
     ~StatusKeycardContextImpl() {
-        // Don't delete app - Qt doesn't like that
+        qDebug() << "StatusKeycardContextImpl: Destructor called";
     }
 };
 
@@ -483,79 +492,79 @@ char* MockedLibKeycardRemoved() {
     return MockedLibKeycardRemovedWithContext(g_global_context);
 }
 
-// ============================================================================
-// Android JNI Support
-// ============================================================================
+// // ============================================================================
+// // Android JNI Support
+// // ============================================================================
 
-// NOTE: This section is now OBSOLETE after Qt NFC fix in keycard-qt
-//
-// The JNI registration fix in keycard-qt/src/channel/android_jni_register.cpp
-// properly registers QtNative.onNewIntent(), enabling Qt NFC to work automatically
-// without any Activity modifications or manual tag forwarding.
-//
-// This code is kept for reference but is no longer used or needed.
-// Qt NFC now handles everything automatically!
-//
-// See: keycard-qt/src/channel/android_jni_register.cpp
+// // NOTE: This section is now OBSOLETE after Qt NFC fix in keycard-qt
+// //
+// // The JNI registration fix in keycard-qt/src/channel/android_jni_register.cpp
+// // properly registers QtNative.onNewIntent(), enabling Qt NFC to work automatically
+// // without any Activity modifications or manual tag forwarding.
+// //
+// // This code is kept for reference but is no longer used or needed.
+// // Qt NFC now handles everything automatically!
+// //
+// // See: keycard-qt/src/channel/android_jni_register.cpp
 
-#if 0  // DISABLED - Qt NFC works automatically now
-#ifdef Q_OS_ANDROID
-#include <keycard-qt/keycard_channel.h>
+// #if 0  // DISABLED - Qt NFC works automatically now
+// #ifdef Q_OS_ANDROID
+// #include <keycard-qt/keycard_channel.h>
 
-int KeycardSetAndroidTag(JNIEnv* env, jobject tag) {
-    qWarning() << "========================================";
-    qWarning() << "🎯 KeycardSetAndroidTag: Called from Java!";
-    qWarning() << "🎯 JNI env:" << (void*)env;
-    qWarning() << "🎯 Tag object:" << (void*)tag;
+// int KeycardSetAndroidTag(JNIEnv* env, jobject tag) {
+//     qWarning() << "========================================";
+//     qWarning() << "🎯 KeycardSetAndroidTag: Called from Java!";
+//     qWarning() << "🎯 JNI env:" << (void*)env;
+//     qWarning() << "🎯 Tag object:" << (void*)tag;
     
-    // Ensure global context exists
-    ensure_global_context();
+//     // Ensure global context exists
+//     ensure_global_context();
     
-    if (!g_global_context || !g_global_context->rpcService) {
-        qCritical() << "❌ KeycardSetAndroidTag: No RpcService available!";
-        return 0;
-    }
+//     if (!g_global_context || !g_global_context->rpcService) {
+//         qCritical() << "❌ KeycardSetAndroidTag: No RpcService available!";
+//         return 0;
+//     }
     
-    // Get the SessionManager from the RpcService
-    auto* sessionManager = g_global_context->rpcService->sessionManager();
-    if (!sessionManager) {
-        qCritical() << "❌ KeycardSetAndroidTag: No SessionManager available!";
-        return 0;
-    }
+//     // Get the SessionManager from the RpcService
+//     auto* sessionManager = g_global_context->rpcService->sessionManager();
+//     if (!sessionManager) {
+//         qCritical() << "❌ KeycardSetAndroidTag: No SessionManager available!";
+//         return 0;
+//     }
     
-    // Get the KeycardChannel from the SessionManager
-    auto* channel = sessionManager->getChannel();
-    if (!channel) {
-        qCritical() << "❌ KeycardSetAndroidTag: No KeycardChannel available!";
-        qCritical() << "❌ Make sure SessionManager::start() was called first!";
-        return 0;
-    }
+//     // Get the KeycardChannel from the SessionManager
+//     auto* channel = sessionManager->getChannel();
+//     if (!channel) {
+//         qCritical() << "❌ KeycardSetAndroidTag: No KeycardChannel available!";
+//         qCritical() << "❌ Make sure SessionManager::start() was called first!";
+//         return 0;
+//     }
     
-    qWarning() << "🎯 Found KeycardChannel at:" << (void*)channel;
-    qWarning() << "🎯 Calling setAndroidTag()...";
+//     qWarning() << "🎯 Found KeycardChannel at:" << (void*)channel;
+//     qWarning() << "🎯 Calling setAndroidTag()...";
     
-    // Call setAndroidTag on the KeycardChannel
-    bool success = channel->setAndroidTag(tag);
+//     // Call setAndroidTag on the KeycardChannel
+//     bool success = channel->setAndroidTag(tag);
     
-    if (success) {
-        qWarning() << "✅ KeycardSetAndroidTag: SUCCESS! Tag set and connected";
-        qWarning() << "========================================";
-        return 1;
-    } else {
-        qCritical() << "❌ KeycardSetAndroidTag: FAILED to set tag";
-        qWarning() << "========================================";
-        return 0;
-    }
-}
+//     if (success) {
+//         qWarning() << "✅ KeycardSetAndroidTag: SUCCESS! Tag set and connected";
+//         qWarning() << "========================================";
+//         return 1;
+//     } else {
+//         qCritical() << "❌ KeycardSetAndroidTag: FAILED to set tag";
+//         qWarning() << "========================================";
+//         return 0;
+//     }
+// }
 
-// JNI wrapper function that Java can call
-extern "C" JNIEXPORT jint JNICALL
-Java_app_status_mobile_StatusQtActivity_nativeKeycardSetAndroidTag(JNIEnv* env, jobject thiz, jobject tag) {
-    qWarning() << "🔔 JNI: Java_app_status_mobile_StatusQtActivity_nativeKeycardSetAndroidTag called";
-    return KeycardSetAndroidTag(env, tag);
-}
+// // JNI wrapper function that Java can call
+// extern "C" JNIEXPORT jint JNICALL
+// Java_app_status_mobile_StatusQtActivity_nativeKeycardSetAndroidTag(JNIEnv* env, jobject thiz, jobject tag) {
+//     qWarning() << "🔔 JNI: Java_app_status_mobile_StatusQtActivity_nativeKeycardSetAndroidTag called";
+//     return KeycardSetAndroidTag(env, tag);
+// }
 
-#endif // Q_OS_ANDROID
-#endif // DISABLED
+// #endif // Q_OS_ANDROID
+// #endif // DISABLED
 
 } // extern "C"

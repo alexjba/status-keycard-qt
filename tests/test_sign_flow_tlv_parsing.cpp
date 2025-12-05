@@ -194,12 +194,10 @@ private:
 private slots:
     void initTestCase()
     {
-        qDebug() << "=== Starting SignFlow TLV Parsing Tests ===";
     }
 
     void cleanupTestCase()
     {
-        qDebug() << "=== SignFlow TLV Parsing Tests Complete ===";
     }
 
     // ========================================================================
@@ -208,7 +206,6 @@ private slots:
 
     void testParseTLVWithTemplateTag()
     {
-        qDebug() << "Testing TLV parsing with template tag (0xA0)";
         
         // Create a sample public key (65 bytes, uncompressed format)
         QByteArray publicKey(65, 0);
@@ -227,8 +224,6 @@ private slots:
         // Create full TLV response
         QByteArray tlvResponse = createTLVSignResponse(publicKey, derSig);
         
-        qDebug() << "Created TLV response size:" << tlvResponse.size();
-        qDebug() << "First bytes:" << tlvResponse.left(10).toHex();
         
         // Verify structure
         QVERIFY(tlvResponse.size() > 70); // At least pubkey + sig + overhead
@@ -238,12 +233,10 @@ private slots:
         QVERIFY(tlvResponse.contains(publicKey));
         QVERIFY(tlvResponse.indexOf(derSig) > 0);
         
-        qDebug() << "✓ TLV structure valid";
     }
 
     void testParseTLVWithMultiByteLength()
     {
-        qDebug() << "Testing TLV parsing with multi-byte length encoding";
         
         QByteArray publicKey(65, 0);
         publicKey[0] = 0x04;
@@ -259,15 +252,12 @@ private slots:
         QCOMPARE((uint8_t)tlvResponse[1], (uint8_t)0x81); // Multi-byte indicator
         
         int contentLen = (uint8_t)tlvResponse[2];
-        qDebug() << "Content length from TLV:" << contentLen;
         QVERIFY(contentLen > 100); // Should be around 138 bytes
         
-        qDebug() << "✓ Multi-byte length encoding correct";
     }
 
     void testParseDERSignature()
     {
-        qDebug() << "Testing DER signature parsing";
         
         // Create test R and S values (32 bytes each)
         QByteArray r = QByteArray::fromHex("4c9b2ed94d45fd66ff0d6cc69dcfbf34366c14ef894413ec633b8de1c7d11721");
@@ -276,8 +266,6 @@ private slots:
         // Create DER signature
         QByteArray derSig = createDERSignature(r, s);
         
-        qDebug() << "DER signature:" << derSig.toHex();
-        qDebug() << "DER signature size:" << derSig.size();
         
         // Verify DER structure
         QCOMPARE((uint8_t)derSig[0], (uint8_t)0x30); // SEQUENCE tag
@@ -302,12 +290,10 @@ private slots:
         
         QCOMPARE(extractedR, r);
         
-        qDebug() << "✓ DER signature structure valid";
     }
 
     void testParseDERSignatureWithLeadingZeroPadding()
     {
-        qDebug() << "Testing DER signature with leading zero padding (MSB set)";
         
         // Create R and S where MSB is set (requires DER padding)
         QByteArray r = QByteArray::fromHex("8c959e5fd1ab52eea8ca757983f31ea3c7537044c9b0b4b3e2797c55e2f7688f");
@@ -315,7 +301,6 @@ private slots:
         
         QByteArray derSig = createDERSignature(r, s);
         
-        qDebug() << "DER signature with padding:" << derSig.toHex();
         
         // Verify the padding was added (DER should be longer due to 0x00 padding)
         QVERIFY(derSig.size() > 64); // Should be > 64 due to padding bytes
@@ -323,7 +308,6 @@ private slots:
         // Verify structure still starts with 0x30 (SEQUENCE)
         QCOMPARE((uint8_t)derSig[0], (uint8_t)0x30);
         
-        qDebug() << "✓ DER padding for MSB-set values correct";
     }
 
     // ========================================================================
@@ -332,7 +316,6 @@ private slots:
 
     void testECDSARecoveryWithValidSignature()
     {
-        qDebug() << "Testing ECDSA public key recovery with valid signature";
         
         // Generate a real key pair
         QByteArray privateKey, publicKey;
@@ -390,7 +373,6 @@ private slots:
                                       reinterpret_cast<unsigned char*>(recoveredPubKey.data()), 65, nullptr);
                     
                     if (recoveredPubKey == publicKey) {
-                        qDebug() << "✓ Recovery ID" << recoveryId << "matches!";
                         foundMatch = true;
                         
                         // Verify V value (27 or 28 for Ethereum)
@@ -416,12 +398,10 @@ private slots:
         }
         
         QVERIFY(foundMatch);
-        qDebug() << "✓ ECDSA recovery successful";
     }
 
     void testECDSARecoveryFailsWithWrongPublicKey()
     {
-        qDebug() << "Testing ECDSA recovery fails with wrong public key";
         
         // Generate two different key pairs
         QByteArray privateKey1, publicKey1;
@@ -491,7 +471,6 @@ private slots:
         }
         
         QVERIFY(!wrongMatch);
-        qDebug() << "✓ Recovery correctly rejects wrong public key";
     }
 
     // ========================================================================
@@ -500,7 +479,6 @@ private slots:
 
     void testRealWorldTLVResponse()
     {
-        qDebug() << "Testing realistic TLV response structure";
         
         // Create synthetic TLV response using helper functions
         // This ensures correct structure without exposing real account data
@@ -528,7 +506,6 @@ private slots:
         QByteArray tlvResponse = createTLVSignResponse(syntheticPublicKey, derSig);
         
         qDebug() << "TLV response size:" << tlvResponse.size();
-        qDebug() << "First 10 bytes:" << tlvResponse.left(10).toHex();
         
         // Verify structure
         QCOMPARE((uint8_t)tlvResponse[0], (uint8_t)0xa0); // Template tag
@@ -548,14 +525,12 @@ private slots:
         int derSigIdx = tlvResponse.indexOf(QByteArray::fromHex("30"), 70);
         QVERIFY(derSigIdx > 0);
         
-        qDebug() << "DER signature starts at index:" << derSigIdx;
         QCOMPARE((uint8_t)tlvResponse[derSigIdx], (uint8_t)0x30); // DER SEQUENCE tag
         
         // Parse DER signature length
         int derSigLen = (uint8_t)tlvResponse[derSigIdx + 1];
         QByteArray extractedDerSig = tlvResponse.mid(derSigIdx, derSigLen + 2);
         
-        qDebug() << "Extracted DER signature:" << extractedDerSig.toHex();
         
         // Parse R and S from DER
         int idx = derSigIdx + 2;
@@ -582,7 +557,6 @@ private slots:
         QCOMPARE(r.size(), 32);
         QCOMPARE(s.size(), 32);
         
-        qDebug() << "✓ Real-world TLV response parsed successfully";
     }
 };
 

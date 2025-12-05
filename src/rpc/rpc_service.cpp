@@ -172,8 +172,8 @@ QJsonObject RpcService::statusToJson(const SessionManager::Status& status) {
 // ============================================================================
 
 QJsonObject RpcService::handleStart(const QString& id, const QJsonObject& params) {
-    qWarning() << "🔥 RpcService::handleStart() called on RpcService at:" << (void*)this;
-    qWarning() << "🔥 SessionManager at:" << (void*)m_sessionManager.get();
+    qDebug() << "RpcService::handleStart() called on RpcService at:" << (void*)this;
+    qDebug() << "SessionManager at:" << (void*)m_sessionManager.get();
     
     QString storagePath = params["storageFilePath"].toString();
     bool logEnabled = params["logEnabled"].toBool(false);
@@ -198,8 +198,8 @@ QJsonObject RpcService::handleStart(const QString& id, const QJsonObject& params
         return createErrorResponse(id, -32000, m_sessionManager->lastError());
     }
     
-    qWarning() << "🔥 RpcService::handleStart() completed. SessionManager started successfully.";
-    qWarning() << "🔥 KeycardChannel at:" << (void*)m_sessionManager->getChannel();
+    qWarning() << "RpcService::handleStart() completed. SessionManager started successfully.";
+    qWarning() << "KeycardChannel at:" << (void*)m_sessionManager->getChannel();
     
     return createSuccessResponse(id, QJsonObject());
 }

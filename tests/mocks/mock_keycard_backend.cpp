@@ -65,6 +65,7 @@ MockKeycardBackend::MockKeycardBackend(QObject* parent)
     , m_pinRetries(3)
     , m_pukRetries(5)
     , m_autoConnectTimer(new QTimer(this))
+    , m_channelState(Keycard::ChannelState::Idle)
 {
     m_autoConnectTimer->setSingleShot(true);
     connect(m_autoConnectTimer, &QTimer::timeout, this, [this]() {
@@ -164,6 +165,20 @@ void MockKeycardBackend::disconnect()
 {
     if (m_connected) {
         simulateCardRemoved();
+    }
+}
+
+void MockKeycardBackend::setState(Keycard::ChannelState state)
+{
+    m_channelState = state;
+}
+
+void MockKeycardBackend::forceScan()
+{
+    qDebug() << "[MockBackend] Force scan requested";
+    // For mock, we can trigger a scan if detection is active
+    if (m_detecting && !m_connected && m_autoConnect) {
+        m_autoConnectTimer->start(10); // Trigger faster auto-connect
     }
 }
 

@@ -23,6 +23,7 @@ public:
     void emitStatusChanged(const SessionManager::Status& status);
     void emitError(const QString& error);
     void emitSignal(const QString& jsonSignal);
+    void emitChannelStateChanged(const QString& state);
 
 private:
     SignalManager();

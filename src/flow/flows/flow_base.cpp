@@ -1,7 +1,6 @@
 #include "flow_base.h"
 #include "../flow_manager.h"
 #include "../flow_signals.h"
-#include "../../storage/pairing_storage.h"
 #include <keycard-qt/keycard_channel.h>
 #include <QDebug>
 #include <QThread>
@@ -97,7 +96,7 @@ void FlowBase::pauseAndWaitWithStatus(const QString& action, const QString& erro
                action.contains("enter-") || action.contains("input-")) {
         // Waiting for user input - close NFC drawer so user can interact with UI
         qDebug() << "FlowBase: Closing NFC drawer for user input action:" << action;
-        channel()->setState(Keycard::ChannelState::UserInput);
+        channel()->setState(Keycard::ChannelState::Idle);
     }
     
     // Build event with error and status
@@ -138,105 +137,6 @@ void FlowBase::pauseAndRestart(const QString& action, const QString& error)
 // ============================================================================
 // Card operations
 // ============================================================================
-
-// COMMENTED OUT: Using CommandSet::waitForCard() instead for unified architecture
-// This old implementation had platform-specific logic and manual polling.
-// CommandSet::waitForCard() provides cleaner signal-based waiting.
-/*
-bool FlowBase::waitForCard()
-{
-    qDebug() << "FlowBase::waitForCard()";
-    
-    // Check if cancelled before accessing manager resources
-    if (m_cancelled) {
-        return false;
-    }
-    
-    // Check if card already present at flow start
-    // If so, don't emit card-inserted (matching Go behavior)
-    if (channel()->isConnected()) {
-        return true;
-    }
-    
-    // Quick initial check (all platforms: 150ms)
-    // This catches cards that are already present or appear immediately
-    QThread::msleep(150);
-    
-    // Check if cancelled during sleep
-    if (m_cancelled) {
-        return false;
-    }
-    
-    // Check if card appeared during initial wait
-    if (channel()->isConnected()) {
-        return true;
-    }
-    
-    // Loop until card detected (matching Go's connect() pattern)
-    while (true) {
-#if defined(Q_OS_IOS) || defined(Q_OS_ANDROID)
-        // iOS: Open drawer and wait 30 seconds BEFORE sending INSERT_CARD to Desktop
-        // This prevents Desktop's cancel+retry loop from spamming drawer open/close
-        channel()->setState(Keycard::ChannelState::WaitingForCard);
-        
-        const int maxIterations = 300; // 30s = 300 * 100ms
-        bool cardDetected = false;
-        
-        for (int i = 0; i < maxIterations; i++) {
-            QThread::msleep(100);
-            
-            // Check if flow was cancelled
-            if (m_cancelled) {
-                channel()->setState(Keycard::ChannelState::Idle); // Close drawer
-                return false;
-            }
-            
-            // Check if card was detected
-            if (channel()->isConnected()) {
-                cardDetected = true;
-                break;
-            }
-            
-            // Check if NFC session was cancelled by user (drawer dismissed)
-            Keycard::ChannelState currentState = channel()->state();
-            if (currentState != Keycard::ChannelState::WaitingForCard && 
-                currentState != Keycard::ChannelState::CardPresent) {
-                emit flowError("NFC session cancelled by user");
-                return false;
-            }
-        }
-        
-        if (cardDetected) {
-            FlowSignals::emitCardInserted();
-            return true;
-        }
-        
-        // No card after 30s - send INSERT_CARD and let Desktop handle retry
-        channel()->setState(Keycard::ChannelState::Idle); // Close drawer before sending signal
-        pauseAndWait(FlowSignals::INSERT_CARD, "connection-error");
-        
-        if (m_cancelled) {
-            return false;
-        }
-        
-        // Desktop will cancel and retry - loop back to reopen drawer
-#else
-        // PC/SC/Android: Send INSERT_CARD immediately and wait for Desktop/user response
-        pauseAndWait(FlowSignals::INSERT_CARD, "connection-error");
-        
-        if (m_cancelled) {
-            return false;
-        }
-        
-        // After resume, check if card is now present
-        if (channel()->isConnected()) {
-            FlowSignals::emitCardInserted();
-            return true;
-        }
-#endif
-    }
-}
-*/
 
 bool FlowBase::selectKeycard()
 {
@@ -529,46 +429,6 @@ FlowResult FlowBase::loadMnemonic()
             return FlowResult{false, result};
         }
         mnemonic = m_params[FlowParams::MNEMONIC].toString();
-        
-        // // After user entered mnemonic, check if card is still present
-        // // - PCSC: Card likely still connected → waitForCard returns immediately
-        // // - iOS/Android: Card was disconnected (setState(UserInput)) → waitForCard handles re-tap
-        // if (!commandSet()->waitForCard()) {
-        //     QJsonObject error;
-        //     error[FlowParams::ERROR_KEY] = "cancelled";
-        //     return error;
-        // }
-
-        // // Re-authenticate after card re-tap
-        // // - PCSC: Card stayed connected, but secure channel might have been reset
-        // // - iOS/Android: Card was re-tapped, need to re-establish secure channel
-        // // loadSeed() requires authenticated secure channel
-        // qDebug() << "LoadAccountFlow: Re-authenticating after mnemonic entry";
-        // if (!openSecureChannelAndAuthenticate(true)) {
-        //     QJsonObject error;
-        //     error[FlowParams::ERROR_KEY] = "auth-failed";
-        //     return error;
-        // }
-        // // Re-select keycard applet after card reconnection
-        // // On Android/iOS, after setState(UserInput) disconnect, the card reconnects but applet isn't selected
-        // // We must re-select before we can send keycard-specific APDUs
-        // qDebug() << "LoadAccountFlow: Re-selecting keycard applet after mnemonic entry";
-        // if (!selectKeycard()) {
-        //     QJsonObject error;
-        //     error[FlowParams::ERROR_KEY] = "select-failed";
-        //     return error;
-        // }
-        
-        // // Re-authenticate after card re-tap
-        // // - PCSC: Card stayed connected, but secure channel might have been reset
-        // // - iOS/Android: Card was re-tapped, need to re-establish secure channel
-        // // loadSeed() requires authenticated secure channel
-        // qDebug() << "LoadAccountFlow: Re-authenticating after mnemonic entry";
-        // if (!openSecureChannelAndAuthenticate(false)) {
-        //     QJsonObject error;
-        //     error[FlowParams::ERROR_KEY] = "auth-failed";
-        //     return error;
-        // }
     }
 
     // Convert mnemonic to seed using BIP39 standard (PBKDF2-HMAC-SHA512)

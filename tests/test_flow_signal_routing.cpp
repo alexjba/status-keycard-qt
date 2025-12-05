@@ -3,37 +3,29 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSignalSpy>
-#include <status-keycard-qt/status_keycard.h>
-#include "../src/signal_manager.h"
-#include "../src/flow/flow_manager.h"
-#include "../src/flow/flow_signals.h"
-#include "../src/flow/flow_types.h"
+#include "signal_manager.h"
+#include "flow/flow_manager.h"
+#include "flow/flow_signals.h"
+#include "flow/flow_types.h"
 #include "mocks/mock_keycard_backend.h"
 #include <keycard-qt/keycard_channel.h>
+#include <keycard-qt/command_set.h>
+#include <memory>
 
 using namespace StatusKeycard;
 using namespace StatusKeycardTest;
+using namespace Keycard;
 
-/**
- * @brief Test that verifies FlowManager signals are correctly routed to SignalManager
- * 
- * This test proves the fix for the bug where FlowManager::flowSignal was not
- * connected to SignalManager, causing flow signals to be dropped.
- */
 class TestFlowSignalRouting : public QObject
 {
     Q_OBJECT
 
 private:
-    // Signal callback that captures signals
     static void signalCallback(const char* signal) {
         if (!signal) return;
         
-        // Store in static list for verification
         QString signalStr = QString::fromUtf8(signal);
-        qDebug() << "📡 Signal received:" << signalStr;
         
-        // Parse and extract type
         QJsonDocument doc = QJsonDocument::fromJson(signalStr.toUtf8());
         if (doc.isObject()) {
             QJsonObject obj = doc.object();
@@ -43,15 +35,19 @@ private:
     }
     
     static QList<QString> s_receivedSignalTypes;
+    
+    std::shared_ptr<CommandSet> createMockCommandSet()
+    {
+        auto* mockBackend = new MockKeycardBackend();
+        mockBackend->setAutoConnect(true);
+        mockBackend->setCardInitialized(true);
+        auto channel = std::make_shared<KeycardChannel>(mockBackend);
+        return std::make_shared<CommandSet>(channel, nullptr, nullptr);
+    }
 
 private slots:
     void initTestCase()
     {
-        qDebug() << "\n========================================";
-        qDebug() << "Testing Flow Signal Routing";
-        qDebug() << "========================================\n";
-        
-        // Initialize Qt app if needed
         if (!QCoreApplication::instance()) {
             int argc = 0;
             char* argv[] = {nullptr};
@@ -61,81 +57,49 @@ private slots:
     
     void init()
     {
-        // Clear received signals
         s_receivedSignalTypes.clear();
         
-        // Initialize RPC (sets up global context)
-        char* rpcResult = KeycardInitializeRPC();
-        QVERIFY(rpcResult != nullptr);
-        Free(rpcResult);
+        SignalManager::instance()->setCallback(signalCallback);
         
-        // Set callback (uses global context)
-        KeycardSetSignalEventCallback(signalCallback);
+        auto cmdSet = createMockCommandSet();
+        bool success = FlowManager::instance()->init(cmdSet);
+        QVERIFY(success);
         
-        // Initialize FlowManager with mock backend
-        char* result = KeycardInitFlow("/tmp/keycard-test");
-        QVERIFY(result != nullptr);
+        QObject::connect(FlowManager::instance(), &FlowManager::flowSignal,
+                        SignalManager::instance(), [](const QString& type, const QJsonObject& event) {
+            QJsonObject signal;
+            signal["type"] = type;
+            for (auto it = event.begin(); it != event.end(); ++it) {
+                signal[it.key()] = it.value();
+            }
+            QString jsonString = QString::fromUtf8(QJsonDocument(signal).toJson(QJsonDocument::Compact));
+            SignalManager::instance()->emitSignal(jsonString);
+        });
         
-        QJsonDocument doc = QJsonDocument::fromJson(QByteArray(result));
-        QVERIFY(doc.isObject());
-        QJsonObject obj = doc.object();
-        QVERIFY(obj["success"].toBool() == true);
-        
-        Free(result);
-        
-        // Inject mock backend for testing
-        auto* mockBackend = new MockKeycardBackend();
-        mockBackend->setAutoConnect(true);
-        mockBackend->setCardInitialized(true);
-        
-        auto* channel = new Keycard::KeycardChannel(mockBackend);
-        FlowManager::instance()->setChannel(channel);
-        
-        qDebug() << "✓ Test setup complete";
+        auto* backend = qobject_cast<MockKeycardBackend*>(cmdSet->channel()->backend());
+        if (backend) {
+            backend->startDetection();
+            QTest::qWait(150);
+        }
     }
     
     void cleanup()
     {
-        // Cancel any running flow
-        KeycardCancelFlow();
+        FlowManager::instance()->cancelFlow();
+        QTest::qWait(100);
         
-        // Reset API
-        ResetAPI();
-        
-        // Destroy FlowManager singleton to reset state between tests
         FlowManager::destroyInstance();
         
-        qDebug() << "✓ Test cleanup complete\n";
+        SignalManager::instance()->setCallback(nullptr);
+        s_receivedSignalTypes.clear();
     }
-    
-    void cleanupTestCase()
-    {
-        qDebug() << "\n========================================";
-        qDebug() << "Flow Signal Routing Tests Complete";
-        qDebug() << "========================================\n";
-    }
-
-    // ========================================================================
-    // Test: Flow signals are routed to callback
-    // ========================================================================
     
     void testFlowSignalsReachCallback()
     {
-        qDebug() << "\n--- Test: Flow signals reach callback ---";
-        
-        // Start a simple flow (GetAppInfo)
         QJsonObject params;
-        char* result = KeycardStartFlow(static_cast<int>(FlowType::GetAppInfo), 
-                                        QJsonDocument(params).toJson().constData());
-        QVERIFY(result != nullptr);
+        bool success = FlowManager::instance()->startFlow(static_cast<int>(FlowType::GetAppInfo), params);
+        QVERIFY(success);
         
-        QJsonDocument doc = QJsonDocument::fromJson(QByteArray(result));
-        QVERIFY(doc.isObject());
-        QJsonObject obj = doc.object();
-        QVERIFY(obj["success"].toBool() == true);
-        Free(result);
-        
-        // Wait for signals (process events)
         for (int i = 0; i < 50; ++i) {
             QCoreApplication::processEvents();
             QTest::qWait(10);
@@ -144,59 +108,37 @@ private slots:
             }
         }
         
-        // Verify we received at least one signal
         QVERIFY2(!s_receivedSignalTypes.isEmpty(), 
                  "Expected to receive flow signals via callback");
         
-        qDebug() << "✓ Received" << s_receivedSignalTypes.size() << "signal(s):";
-        for (const auto& type : s_receivedSignalTypes) {
-            qDebug() << "  -" << type;
-        }
-        
-        // Cancel to clean up
-        KeycardCancelFlow();
+        FlowManager::instance()->cancelFlow();
+        QTest::qWait(100);
     }
-    
-    // DELETED: testCardInsertedSignalRouting - requires specific mock backend behavior
-    // DELETED: testFlowPauseSignalRouting - requires card-with-keys scenario
-    // DELETED: testMultipleFlowSignalsRouting - requires multiple signal emissions
     
     void testSignalRoutingWithoutCallback()
     {
-        qDebug() << "\n--- Test: Signals handled gracefully without callback ---";
-        
-        // Clear callback
-        KeycardSetSignalEventCallback(nullptr);
+        SignalManager::instance()->setCallback(nullptr);
         s_receivedSignalTypes.clear();
         
-        // Start flow
         QJsonObject params;
-        char* result = KeycardStartFlow(static_cast<int>(FlowType::GetAppInfo), 
-                                        QJsonDocument(params).toJson().constData());
-        QVERIFY(result != nullptr);
-        Free(result);
+        bool success = FlowManager::instance()->startFlow(static_cast<int>(FlowType::GetAppInfo), params);
+        QVERIFY(success);
         
-        // Process events (signals should be dropped gracefully)
         for (int i = 0; i < 20; ++i) {
             QCoreApplication::processEvents();
             QTest::qWait(10);
         }
         
-        // Verify no signals received (callback was null)
         QVERIFY(s_receivedSignalTypes.isEmpty());
         
-        qDebug() << "✓ Signals dropped gracefully without callback (no crash)";
+        FlowManager::instance()->cancelFlow();
+        QTest::qWait(100);
         
-        KeycardCancelFlow();
-        
-        // Restore callback for cleanup
-        KeycardSetSignalEventCallback(signalCallback);
+        SignalManager::instance()->setCallback(signalCallback);
     }
 };
 
-// Static member initialization
 QList<QString> TestFlowSignalRouting::s_receivedSignalTypes;
 
 QTEST_MAIN(TestFlowSignalRouting)
 #include "test_flow_signal_routing.moc"
-

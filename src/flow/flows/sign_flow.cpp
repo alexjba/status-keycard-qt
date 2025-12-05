@@ -188,7 +188,7 @@ QJsonObject SignFlow::execute()
     QByteArray scanData = tlvResponse;
     
     // First, check if response starts with template tag 0xA0 or 0xA1
-    qDebug() << "SignFlow: tlvResponse size:" << tlvResponse.size() << "first byte:" << QString("0x%1").arg((uint8_t)tlvResponse[0], 2, 16, QChar('0'));
+        qDebug() << "SignFlow: tlvResponse size:" << tlvResponse.size() << "first byte:" << QString("0x%1").arg((uint8_t)tlvResponse[0], 2, 16, QChar('0'));
     if (tlvResponse.size() > 2) {
         uint8_t firstTag = static_cast<uint8_t>(tlvResponse[0]);
         qDebug() << "SignFlow: firstTag:" << QString("0x%1").arg(firstTag, 2, 16, QChar('0'));

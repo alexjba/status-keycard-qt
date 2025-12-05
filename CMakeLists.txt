@@ -51,27 +51,6 @@ set(BUILD_EXAMPLES OFF CACHE BOOL "Disable keycard-qt examples" FORCE)
 # This will be linked into status-keycard-qt, so only one library is needed
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build keycard-qt as static library" FORCE)
 
-# Android NFC Backend Configuration
-if(ANDROID)
-    # Option 1: USE_ANDROID_NFC_BACKEND (default: ON)
-    # - ON:  Use direct Android NFC JNI backend (recommended, includes JAR)
-    # - OFF: Use Qt NFC backend (requires ENABLE_QT_NFC_ANDROID_WORKAROUNDS)
-    option(USE_ANDROID_NFC_BACKEND "Use direct Android NFC backend instead of Qt NFC" ON)
-    
-    # Option 2: ENABLE_QT_NFC_ANDROID_WORKAROUNDS (default: OFF if using Android backend)
-    # - Only needed if USE_ANDROID_NFC_BACKEND=OFF
-    # - Works around Qt 6.9.x NFC bugs on Android
-    if(USE_ANDROID_NFC_BACKEND)
-        option(ENABLE_QT_NFC_ANDROID_WORKAROUNDS "Enable Qt 6.9.x NFC workarounds" OFF)
-    else()
-        option(ENABLE_QT_NFC_ANDROID_WORKAROUNDS "Enable Qt 6.9.x NFC workarounds" ON)
-    endif()
-    
-    message(STATUS "=== Android NFC Configuration ===")
-    message(STATUS "  USE_ANDROID_NFC_BACKEND: ${USE_ANDROID_NFC_BACKEND}")
-    message(STATUS "  ENABLE_QT_NFC_ANDROID_WORKAROUNDS: ${ENABLE_QT_NFC_ANDROID_WORKAROUNDS}")
-    message(STATUS "=================================")
-endif()
 
 # Fetch keycard-qt with configuration
 # Allow using local keycard-qt for development/testing
@@ -103,7 +82,6 @@ set(KEYCARD_QT_DIR "${keycard-qt_SOURCE_DIR}")
 set(SOURCES
     src/c_api.cpp
     src/session/session_manager.cpp
-    src/storage/pairing_storage.cpp
     src/storage/file_pairing_storage.cpp
     src/signal_manager.cpp
     src/rpc/rpc_service.cpp
@@ -125,12 +103,6 @@ set(SOURCES
     src/flow/flows/get_metadata_flow.cpp
     src/flow/flows/store_metadata_flow.cpp
 )
-
-if(ANDROID)
-    list(APPEND SOURCES 
-        src/android_nfc_bridge.cpp
-    )
-endif()
 
 # Create library (shared or static based on BUILD_SHARED_LIBS)
 add_library(status-keycard-qt ${SOURCES})

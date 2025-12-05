@@ -65,8 +65,6 @@ QJsonObject GetMetadataFlow::execute()
     // Get metadata from card (matching status-keycard-go)
     qDebug() << "GetMetadataFlow: Getting metadata from card";
     QByteArray metadataData = commandSet()->getData(Keycard::APDU::P1StoreDataPublic);  // 0x00
-    qDebug() << "GetMetadataFlow: Received" << metadataData.size() << "bytes";
-    qDebug() << "GetMetadataFlow: Raw data hex:" << metadataData.toHex();
     
     // Check if data looks like a status word (error response)
     // Status words are 2 bytes: SW1 SW2 (e.g. 0x6a86 = no data available)
@@ -115,8 +113,6 @@ QJsonObject GetMetadataFlow::execute()
     uint8_t header = static_cast<uint8_t>(metadataData[offset++]);
     uint8_t version = header >> 5;
     uint8_t namelen = header & 0x1F;
-    
-    qDebug() << "GetMetadataFlow: Metadata version:" << version << "namelen:" << namelen;
     
     if (version != 1) {
         qWarning() << "GetMetadataFlow: Invalid metadata version:" << version;
@@ -227,13 +223,10 @@ QJsonObject GetMetadataFlow::execute()
                             
                             if (tag == 0x80) {  // Public key tag
                                 publicKey = masterKeyData.mid(offset, len);
-                                qDebug() << "GetMetadataFlow: Found master public key, len=" << len;
                             } else if (tag == 0x81) {  // Private key tag
                                 privateKey = masterKeyData.mid(offset, len);
-                                qDebug() << "GetMetadataFlow: Found master private key, len=" << len;
                             } else if (tag == 0x82) {  // Chain code tag
                                 chainCode = masterKeyData.mid(offset, len);
-                                qDebug() << "GetMetadataFlow: Found master chain code, len=" << len;
                             }
                             offset += len;
                         }
@@ -247,19 +240,14 @@ QJsonObject GetMetadataFlow::execute()
                     QByteArray addressBytes = hash.right(20);  // Last 20 bytes
                     QString masterAddress = QString("0x") + addressBytes.toHex();
                     
-                    qDebug() << "GetMetadataFlow: Master public key:" << publicKey.toHex();
-                    qDebug() << "GetMetadataFlow: Master address:" << masterAddress;
-                    
                     // Store master key data in metadata
                     metadata["masterAddress"] = masterAddress;
                     metadata["masterPublicKey"] = QString::fromLatin1(publicKey.toHex());
                     if (!privateKey.isEmpty()) {
                         metadata["masterPrivateKey"] = QString::fromLatin1(privateKey.toHex());
-                        qDebug() << "GetMetadataFlow: Master private key length:" << privateKey.size();
                     }
                     if (!chainCode.isEmpty()) {
                         metadata["masterChainCode"] = QString::fromLatin1(chainCode.toHex());
-                        qDebug() << "GetMetadataFlow: Master chain code:" << chainCode.toHex();
                     }
                 } else {
                     qWarning() << "GetMetadataFlow: Invalid master public key format, size=" << publicKey.size();
@@ -273,7 +261,6 @@ QJsonObject GetMetadataFlow::execute()
             QJsonObject wallet = wallets[i].toObject();
             QString walletPath = wallet["path"].toString();
             
-            qDebug() << "GetMetadataFlow: Exporting key for path:" << walletPath;
             QByteArray keyData = commandSet()->exportKey(true, false, walletPath);
             if (!keyData.isEmpty()) {
                 // Parse TLV structure to extract public key, private key, and chain code
@@ -299,13 +286,10 @@ QJsonObject GetMetadataFlow::execute()
                             
                             if (tag == 0x80) {  // Public key tag
                                 publicKey = keyData.mid(offset, len);
-                                qDebug() << "GetMetadataFlow: Found public key, len=" << len;
                             } else if (tag == 0x81) {  // Private key tag
                                 privateKey = keyData.mid(offset, len);
-                                qDebug() << "GetMetadataFlow: Found private key, len=" << len;
                             } else if (tag == 0x82) {  // Chain code tag
                                 chainCode = keyData.mid(offset, len);
-                                qDebug() << "GetMetadataFlow: Found chain code, len=" << len;
                             }
                             offset += len;
                         }
@@ -320,17 +304,13 @@ QJsonObject GetMetadataFlow::execute()
                     // Store hex-encoded private key (if present) - marked as omitempty in Go
                     if (!privateKey.isEmpty()) {
                         wallet["privateKey"] = QString::fromLatin1(privateKey.toHex());
-                        qDebug() << "GetMetadataFlow: Private key length:" << privateKey.size();
                     }
                     
                     // Store hex-encoded chain code (if present)
                     if (!chainCode.isEmpty()) {
                         wallet["chainCode"] = QString::fromLatin1(chainCode.toHex());
-                        qDebug() << "GetMetadataFlow: Chain code:" << chainCode.toHex();
                     }
                     
-                    qDebug() << "GetMetadataFlow: Public key:" << publicKey.toHex();
-                    qDebug() << "GetMetadataFlow: Derived address:" << wallet["address"].toString();
                 } else {
                     qWarning() << "GetMetadataFlow: Invalid public key format, size=" << publicKey.size();
                 }

@@ -11,12 +11,10 @@ namespace StatusKeycard {
 GetAppInfoFlow::GetAppInfoFlow(FlowManager* manager, const QJsonObject& params, QObject* parent)
     : FlowBase(manager, FlowType::GetAppInfo, params, parent)
 {
-    qDebug() << "GetAppInfoFlow: Created";
 }
 
 GetAppInfoFlow::~GetAppInfoFlow()
 {
-    qDebug() << "GetAppInfoFlow: Destroyed";
 }
 
 QJsonObject GetAppInfoFlow::execute()
@@ -58,13 +56,11 @@ QJsonObject GetAppInfoFlow::execute()
             error[FlowParams::ERROR_KEY] = "factory-reset-failed";
             return error;
         }
-        
-        qDebug() << "GetAppInfoFlow: Factory reset completed successfully";
-        
+                
         // After factory reset, card session must be reset (all platforms)
         // On Android: disconnect() stops reader mode, forceScan() restarts it -> fresh IsoDep session
         // On iOS/PCSC: disconnect() closes connection, forceScan() triggers re-detection
-        qDebug() << "GetAppInfoFlow: Disconnecting and forcing card re-scan (all platforms)";
+        qDebug() << "GetAppInfoFlow: Disconnecting and forcing card re-scan";
         channel()->disconnect();
         channel()->forceScan();
 

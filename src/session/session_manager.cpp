@@ -1,9 +1,6 @@
 #include "session_manager.h"
-#include "storage/pairing_storage.h"
-#include "storage/file_pairing_storage.h"
 #include "signal_manager.h"
 #include <keycard-qt/types.h>
-#include <keycard-qt/backends/keycard_channel_qt_nfc.h>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -51,7 +48,6 @@ SessionManager::SessionManager(QObject* parent)
     : QObject(parent)
     , m_state(SessionState::UnknownReaderState)
     , m_started(false)
-    , m_authorized(false)
     , m_stateCheckTimer(new QTimer(this))
 {
     // CRITICAL: Ensure we're in the main Qt thread for NFC events
@@ -73,8 +69,21 @@ SessionManager::~SessionManager()
     stop();
 }
 
+void SessionManager::startCardOperation()
+{
+    qDebug() << "SessionManager::startCardOperation() ";
+    auto channel = m_channel.get();
+    if (channel) {
+        QMetaObject::invokeMethod(channel, [channel]() {
+            qDebug() << "SessionManager::startCardOperation() invoke method " << (channel ? "YES" : "NO");
+            channel->setState(Keycard::ChannelState::WaitingForCard);
+        }, Qt::QueuedConnection);
+    }
+}
+
 void SessionManager::operationCompleted()
 {
+    qDebug() << "SessionManager::operationCompleted()";
     if (m_channel) {
         m_channel->setState(Keycard::ChannelState::Idle);
     }
@@ -91,13 +100,17 @@ void SessionManager::setCommandSet(std::shared_ptr<Keycard::CommandSet> commandS
     }
     qDebug() << "SessionManager::setCommandSet() - Setting shared CommandSet";
     m_commandSet = commandSet;
+
+    if (!m_commandSet) {
+        qWarning() << "SessionManager: No command set available";
+        return;
+    }
+
     m_channel = m_commandSet->channel();
     if (!m_channel) {
         qWarning() << "SessionManager: No channel set";
         return;
     }
-
-    m_channel->startDetection();
 
     // Connect signals
     connect(m_channel.get(), &Keycard::KeycardChannel::readerAvailabilityChanged,
@@ -122,7 +135,12 @@ bool SessionManager::start(bool logEnabled, const QString& logFilePath)
 
     if (m_channel) {
         qDebug() << "SessionManager: Starting card detection...";
-        m_channel->startDetection();
+        m_channel->setState(Keycard::ChannelState::WaitingForCard);
+        // Transition to WaitingForCard state
+        setState(SessionState::WaitingForCard);
+    } else {
+        // No channel available - set to waiting for reader
+        setState(SessionState::WaitingForReader);
     }
 
     m_started = true;
@@ -135,29 +153,13 @@ void SessionManager::stop()
     if (!m_started) {
         return;
     }
-
-    // CRITICAL: Lock operation mutex to prevent race with background openSecureChannel()
-    // If a background thread is running openSecureChannel() and we destroy m_channel/m_commandSet,
-    // the background thread will crash when accessing these objects.
-    // The mutex ensures we wait for any in-flight operations to complete before destroying.
-    qDebug() << "SessionManager::stop(): Acquiring lock to safely destroy channel/commandSet";
-    {
-        QMutexLocker locker(&m_operationMutex);
-        qDebug() << "SessionManager::stop(): Lock acquired, safe to destroy";
-        
-        if (m_channel) {
-            // KeycardChannel is in main thread, direct calls are safe
-            // Explicitly transition to Idle to close iOS NFC drawer
-            m_channel->setState(Keycard::ChannelState::Idle);
-            m_channel->disconnect();
-        }
-    }
-    qDebug() << "SessionManager::stop(): Channel and CommandSet destroyed safely";
     
     m_started = false;
-    m_authorized = false;
     m_currentCardUID.clear();
-    
+
+    if (m_channel) {
+        m_channel->setState(Keycard::ChannelState::Idle);
+    }
     setState(SessionState::UnknownReaderState);
     qDebug() << "SessionManager: Stopped";
 }
@@ -180,52 +182,20 @@ void SessionManager::onReaderAvailabilityChanged(bool available)
     qDebug() << "SessionManager: Reader availability changed:" << (available ? "available" : "not available");
     
     if (available) {
-        // CRITICAL: Only reset connection if we're in an initial state
-        // If we're already connected (Ready/Authorized/ConnectingCard), DON'T destroy CommandSet!
-        // iOS auto-resume temporarily stops/starts detection, which would destroy active CommandSet
         if (m_state == SessionState::UnknownReaderState || m_state == SessionState::WaitingForReader) {
-            // Initial state - safe to reset any stale connection
-            if (m_commandSet || m_channel->isConnected()) {
-                qDebug() << "SessionManager: Clearing stale card connection (initial state, reader availability changed)";
-                closeSecureChannel();
-            }
-            
-            // Transition to WaitingForCard
-            // This matches Go's connectCard() line 252: kc.status.Reset(WaitingForCard)
             setState(SessionState::WaitingForCard);
-            
-            // iOS: Open NFC drawer for initial login flow
-            // When user is at Login screen and selects "Login with Keycard", show the drawer
-            // This is the ONLY place where we automatically open the drawer for Session API
-            qDebug() << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
-            qDebug() << "SessionManager: Opening NFC drawer for initial Login flow";
-            qDebug() << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
             m_channel->setState(Keycard::ChannelState::WaitingForCard);
-            // This allows user to enter PIN, etc. before showing iOS NFC drawer
-        } else {
-            // Already connected or in progress - ignore this signal
-            // This happens during iOS auto-resume when detection is restarted temporarily
-            qDebug() << "SessionManager: Reader availability signal ignored (already connected, current state:" << currentStateString() << ")";
         }
     } else {
-        // No readers present - clear any connection and transition to WaitingForReader
-        // This matches Go's connectCard() line 242: kc.status.Reset(WaitingForReader)
-        if (m_commandSet || m_channel->isConnected()) {
-            qDebug() << "SessionManager: Clearing card connection (no readers)";
-            closeSecureChannel();
-        }
-        
-        if (m_state == SessionState::UnknownReaderState || m_state == SessionState::WaitingForCard) {
-            setState(SessionState::WaitingForReader);
-        }
+        setState(SessionState::WaitingForReader);
     }
 }
 
 void SessionManager::onCardDetected(const QString& uid)
 {
     qDebug() << "========================================";
-    qDebug() << "🎴 SessionManager: CARD DETECTED! UID:" << uid;
-    qDebug() << "🎴   Thread:" << QThread::currentThread();
+    qDebug() << " SessionManager: CARD DETECTED! UID:" << uid;
+    qDebug() << "   Thread:" << QThread::currentThread();
     qDebug() << "========================================";
     
     // iOS: Ignore re-taps of the same card when already Ready/Authorized
@@ -240,8 +210,7 @@ void SessionManager::onCardDetected(const QString& uid)
     }
     
     m_currentCardUID = uid;
-    
-    emit cardDetected(uid);
+
     setState(SessionState::ConnectingCard);
     
     // iOS: Run secure channel opening in background thread to avoid blocking main thread
@@ -261,7 +230,6 @@ void SessionManager::onCardDetected(const QString& uid)
             }, Qt::QueuedConnection);
             return;
         }
-        
         // Select applet (doesn't require pairing/secure channel)
         m_appInfo = m_commandSet->select();
         // Check if select succeeded: initialized cards have instanceUID, pre-initialized cards have secureChannelPublicKey
@@ -273,33 +241,39 @@ void SessionManager::onCardDetected(const QString& uid)
             }, Qt::QueuedConnection);
             return;
         }
-        
-        qDebug() << "SessionManager: Selected applet, InstanceUID:" << m_appInfo.instanceUID.toHex();
-        qDebug() << "SessionManager: Card initialized:" << m_appInfo.initialized;
-        qDebug() << "SessionManager: Available slots:" << m_appInfo.availableSlots;
-        
-        // Marshal back to main thread for state updates
-        QMetaObject::invokeMethod(this, [this]() {
-            // Check if card is initialized
-            if (!m_appInfo.initialized) {
-                qDebug() << "SessionManager: Card is empty (not initialized)";
+        // Check if card is initialized
+        if (!m_appInfo.initialized) {
+            qDebug() << "SessionManager: Card is empty (not initialized)";
+            QMetaObject::invokeMethod(this, [this]() {
                 setState(SessionState::EmptyKeycard);
-            } else {
-                // Check if card has no available pairing slots
-                setState(SessionState::Ready);
-            }
-            
-            // iOS: Close NFC drawer now that we've read the card data
-            // User can now see card info and decide what to do (pair, factory reset, etc.)
-            qDebug() << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
-            qDebug() << "SessionManager: Card data read successfully (metadata available without pairing)";
-            qDebug() << "SessionManager: Closing NFC drawer + stopping detection (iOS)";
-            qDebug() << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
-            if (m_channel) {
-                // Transition to Idle - on iOS this automatically stops NFC session and detection
-                m_channel->setState(Keycard::ChannelState::Idle);
-            }
+            }, Qt::QueuedConnection);
+            return;
+        }
+
+        if (!m_commandSet->ensurePairing()) {
+            QMetaObject::invokeMethod(this, [this]() {
+                setState(m_appInfo.availableSlots > 0 ? 
+                SessionState::PairingError :
+                SessionState::NoAvailablePairingSlots);
+            }, Qt::QueuedConnection);
+            return;
+        }
+
+        if (!m_commandSet->ensureSecureChannel()) {
+            QMetaObject::invokeMethod(this, [this]() {
+                setState(SessionState::ConnectionError);
+            }, Qt::QueuedConnection);
+            return;
+        }
+
+        m_appStatus = m_commandSet->cachedApplicationStatus();
+        m_metadata = getMetadata();
+
+        QMetaObject::invokeMethod(this, [this]() {
+            setState(SessionState::Ready);
         }, Qt::QueuedConnection);
+
+        operationCompleted();
     });
 }
 
@@ -308,18 +282,16 @@ void SessionManager::onCardRemoved()
     qDebug() << "========================================";
     qDebug() << "SessionManager: CARD REMOVED";
     qDebug() << "========================================";
+#if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
+    qDebug() << "Ignoring card removal";
+    return;
+#else
     m_currentCardUID.clear();
-    m_authorized = false;
-    closeSecureChannel();
-    
-    emit cardRemoved();
     
     if (m_started) {
         setState(SessionState::WaitingForCard);
-        
-        // Note: iOS NFC session will restart automatically on next transmit()
-        // No need to manually restart here
     }
+#endif
 }
 
 void SessionManager::onChannelError(const QString& error)
@@ -327,131 +299,6 @@ void SessionManager::onChannelError(const QString& error)
     qWarning() << "SessionManager: Channel error:" << error;
     setError(error);
     emit this->error(error);
-}
-
-void SessionManager::checkCardState()
-{
-    // Periodic check for card state changes
-    // The channel handles most of this via signals
-}
-
-// bool SessionManager::openSecureChannel()
-// {
-//     // CRITICAL: Serialize card operations to prevent concurrent APDU corruption
-//     QMutexLocker locker(&m_operationMutex);
-    
-//     // CRITICAL FIX: Always recreate CommandSet before opening secure channel
-//     // This ensures fresh SecureChannel state regardless of:
-//     // 1. Card inserted after startup (CommandSet sat idle)
-//     // 2. Card removed and reinserted (stale session state)
-//     // 3. Previous failed attempts (corrupted state)
-//     if (m_channel) {
-//         qDebug() << "SessionManager: Creating fresh CommandSet with dependency injection for new secure channel session";
-//         m_commandSet = std::make_unique<Keycard::CommandSet>(
-//             m_channel.get(),
-//             m_pairingStorage.get(),
-//             [this](const QString& cardUID) { return getPairingPassword(cardUID); }
-//         );
-//     }
-    
-//     if (!m_commandSet) {
-//         qWarning() << "SessionManager: No command set available";
-//         return false;
-//     }
-    
-//     // Select applet
-//     m_appInfo = m_commandSet->select();
-//     // Check if select succeeded: initialized cards have instanceUID, pre-initialized cards have secureChannelPublicKey
-//     if (m_appInfo.instanceUID.isEmpty() && m_appInfo.secureChannelPublicKey.isEmpty()) {
-//         qWarning() << "SessionManager: Failed to select applet";
-//         return false;
-//     }
-    
-//     qDebug() << "SessionManager: Selected applet, InstanceUID:" << m_appInfo.instanceUID.toHex();
-//     qDebug() << "SessionManager: Card initialized:" << m_appInfo.initialized;
-//     qDebug() << "SessionManager: Card installed:" << m_appInfo.installed;
-//     qDebug() << "SessionManager: App version:" << QString("%1.%2").arg(m_appInfo.appVersion).arg(m_appInfo.appVersionMinor);
-//     qDebug() << "SessionManager: Available slots:" << m_appInfo.availableSlots;
-//     qDebug() << "SessionManager: Key UID:" << m_appInfo.keyUID.toHex();
-    
-//     // Check if card needs initialization
-//     if (!m_appInfo.initialized) {
-//         qWarning() << "========================================";
-//         qWarning() << "⚠️  SessionManager: CARD NOT INITIALIZED";
-//         qWarning() << "⚠️  Card detected but needs initialization before use";
-//         qWarning() << "========================================";
-//         qWarning() << "💡 Use Init flow to initialize the card";
-//         qWarning() << "💡 Call KeycardInitialize.init(PIN, PUK, PairingPassword)";
-//         qWarning() << "========================================";
-//         // Return true to allow Init flow to proceed - this is not an error
-//         return true;
-//     }
-    
-//     // CommandSet now handles pairing and secure channel automatically via dependency injection
-//     // No need for manual pairing loading/injection - it's all handled transparently
-//     qDebug() << "SessionManager: Card initialized, pairing will be handled automatically by CommandSet";
-    
-//     // CRITICAL: Initialize card state after opening secure channel
-//     // This matches status-keycard-go's connectKeycard() flow (line 420-437)
-//     // The card expects a GET_STATUS command after opening secure channel to properly
-//     // initialize internal state. Without this, subsequent commands like VERIFY_PIN
-//     // may fail with unexpected errors (0x6F05, 0x6985, etc.)
-//     qDebug() << "SessionManager: Fetching application status to initialize card state";
-//     m_appStatus = m_commandSet->getStatus(Keycard::APDU::P1GetStatusApplication);
-//     if (m_appStatus.pinRetryCount < 0) {
-//         qWarning() << "SessionManager: Failed to get application status:" << m_commandSet->lastError();
-//         qWarning() << "SessionManager: Continuing anyway, but card operations may fail";
-//         // Don't return false - this is initialization, not critical
-//     } else {
-//         qDebug() << "SessionManager: Application status fetched successfully";
-//         qDebug() << "  PIN retry count:" << m_appStatus.pinRetryCount;
-//         qDebug() << "  PUK retry count:" << m_appStatus.pukRetryCount;
-//         qDebug() << "  Key initialized:" << m_appStatus.keyInitialized;
-//     }
-    
-//     // Fetch metadata proactively (matches status-keycard-go line 432: updateMetadata())
-//     // Metadata contains wallet account addresses, names, and derivation paths
-//     // This is done during connection so the app has account info available immediately
-//     qDebug() << "SessionManager: Fetching metadata from card";
-//     try {
-//         Metadata metadata = getMetadata();
-//         if (!metadata.wallets.isEmpty()) {
-//             qDebug() << "SessionManager: Loaded metadata with" << metadata.wallets.size() << "wallet(s)";
-//             qDebug() << "  Name:" << metadata.name;
-//             for (const auto& wallet : metadata.wallets) {
-//                 qDebug() << "    Wallet address:" << wallet.address;
-//             }
-//         } else {
-//             qDebug() << "SessionManager: No metadata found on card (empty or not set)";
-//         }
-//     } catch (...) {
-//         qWarning() << "SessionManager: Failed to fetch metadata, continuing anyway";
-//         // Don't fail connection if metadata fetch fails - it's not critical
-//         // Metadata can be fetched later on-demand
-//     }
-    
-//     // CRITICAL: Clear any error from metadata fetch
-//     // getMetadata() may set an error if called before state transition completes,
-//     // but we don't want that error to affect subsequent operations
-//     m_lastError.clear();
-    
-//     return true;
-// }
-
-void SessionManager::closeSecureChannel()
-{
-    // CRITICAL: Lock to prevent race with background openSecureChannel()
-    // If openSecureChannel() is creating a new CommandSet while we're destroying it,
-    // we could have a use-after-free or double-delete
-    QMutexLocker locker(&m_operationMutex);
-    
-    // CRITICAL: Check if command set exists before accessing
-    if (m_commandSet) {
-        m_commandSet->resetSecureChannel();
-        qDebug() << "SessionManager: Secure channel closed, crypto state reset";
-    } else {
-        qDebug() << "SessionManager: Secure channel already closed (no CommandSet)";
-    }
 }
 
 void SessionManager::setError(const QString& error)
@@ -487,10 +334,14 @@ SessionManager::Status SessionManager::getStatus() const
         status.keycardStatus->keyInitialized = m_appStatus.keyInitialized;
         status.keycardStatus->path = ""; // TODO: Get from card if available
     }
-    
-    // Build metadata (if we have it)
-    // TODO: Load metadata from card or cache
-    
+
+    // Only include metadata if we have some
+    if (!m_metadata.name.isEmpty() || !m_metadata.wallets.isEmpty()) {
+        status.metadata = new Metadata();
+        status.metadata->name = m_metadata.name;
+        status.metadata->wallets = m_metadata.wallets;
+    }
+
     return status;
 }
 
@@ -501,16 +352,11 @@ bool SessionManager::initialize(const QString& pin, const QString& puk, const QS
     qDebug() << "SessionManager::initialize()";
     QMutexLocker locker(&m_operationMutex);
 
-    if (m_state != SessionState::Ready && m_state != SessionState::EmptyKeycard) {
-        setError("Card not ready for initialization (current state: " + currentStateString() + ")");
-        return false;
-    }
     
     if (!m_commandSet) {
         setError("No command set available (no card connected)");
         return false;
     }
-    
     QString password = pairingPassword.isEmpty() ? "KeycardDefaultPairing" : pairingPassword;
     Keycard::Secrets secrets(pin, puk, password);
     bool result = m_commandSet->init(secrets);
@@ -518,29 +364,11 @@ bool SessionManager::initialize(const QString& pin, const QString& puk, const QS
         setError(m_commandSet->lastError());
         return false;
     }
-    
-    qDebug() << "SessionManager: Card initialized successfully";
-    
-    // After initialization, card has new credentials (PIN, PUK, pairing)
-    // Current connection is no longer valid - must reset and re-detect card
-    // This matches status-keycard-go: resetCardConnection() + forceScan()
-    qDebug() << "SessionManager: Resetting connection to establish pairing and secure channel";
-    
-    closeSecureChannel();
-    
-    // CRITICAL: After INIT command, card is in a session state that blocks pairing
-    // MUST physically disconnect and reconnect to reset card session state
-    // This matches status-keycard-go: resetCardConnection() + forceScan()
-    // On Android: disconnect() stops reader mode, forceScan() restarts it -> fresh IsoDep session
-    // On iOS/PCSC: disconnect() closes connection, forceScan() triggers re-detection
-    qDebug() << "SessionManager: Disconnecting and forcing card re-scan (all platforms)";
-    m_currentCardUID.clear();
-    m_authorized = false;
-    m_channel->disconnect();
-    m_channel->forceScan();
-    
-    operationCompleted();
 
+    m_currentCardUID.clear();
+    m_appStatus = m_commandSet->cachedApplicationStatus();
+    m_appInfo = m_commandSet->select(false);
+    setState(SessionState::Ready);
     return true;
 }
 
@@ -575,12 +403,6 @@ bool SessionManager::authorize(const QString& pin)
         return false;
     }
     
-    // // CRITICAL: Update application status after PIN verification
-    // // This matches status-keycard-go's onAuthorizeInteractions() (line 614-622)
-    // // After successful PIN verification, card's internal state changes
-    // // GET_STATUS synchronizes this state with the client
-    // qDebug() << "SessionManager: PIN verified successfully, updating application status";
-    // m_appStatus = m_commandSet->getStatus(Keycard::APDU::P1GetStatusApplication);
     if (m_appStatus.pinRetryCount >= 0) {
         qDebug() << "SessionManager: Application status updated after authorization";
         qDebug() << "  PIN retry count:" << m_appStatus.pinRetryCount;
@@ -591,7 +413,6 @@ bool SessionManager::authorize(const QString& pin)
         qWarning() << "SessionManager: This may cause subsequent operations to fail";
     }
     
-    m_authorized = true;
     setState(SessionState::Authorized);
     operationCompleted();
     return true;
@@ -693,11 +514,6 @@ QVector<int> SessionManager::generateMnemonic(int length)
 QString SessionManager::loadMnemonic(const QString& mnemonic, const QString& passphrase)
 {
     QMutexLocker locker(&m_operationMutex);
-
-    if (m_state != SessionState::Authorized) {
-        setError("Not authorized");
-        return QString();
-    }
     
     if (!m_commandSet) {
         setError("No command set available");
@@ -753,9 +569,9 @@ QString SessionManager::loadMnemonic(const QString& mnemonic, const QString& pas
 bool SessionManager::factoryReset()
 {
     QMutexLocker locker(&m_operationMutex);
-
-    if (m_state != SessionState::Ready && m_state != SessionState::Authorized) {
-        setError("Card not ready");
+    
+    if (!m_commandSet) {
+        setError("No command set available (no card connected)");
         return false;
     }
     
@@ -767,13 +583,11 @@ bool SessionManager::factoryReset()
     
     qDebug() << "SessionManager: Factory reset complete";
 
-    closeSecureChannel();
+    m_appInfo = m_commandSet->select(true);
 
     m_currentCardUID.clear();
-    m_authorized = false;
-    m_channel->disconnect();
-    m_channel->forceScan();
-
+    m_appStatus = m_commandSet->cachedApplicationStatus();
+    setState(SessionState::EmptyKeycard);
     operationCompleted();
 
     return true;
@@ -1001,20 +815,12 @@ SessionManager::LoginKeys SessionManager::exportLoginKeys()
         setError("No command set available");
         return keys;
     }
-    
-    qDebug() << "SessionManager: Exporting login keys";
-    
-    // Export whisper private key
-    // CRITICAL: Use makeCurrent=true for the FIRST export after opening secure channel!
-    // The keycard has an internal "current key" pointer that must be set before derivation.
-    // After opening a secure channel, this pointer is unset. The first exportKey call
-    // with makeCurrent=true will set it, allowing subsequent exports to work.
+
     qDebug() << "SessionManager: Exporting whisper key from path:" << PATH_WHISPER;
     QByteArray whisperData = m_commandSet->exportKey(true, true, PATH_WHISPER, Keycard::APDU::P2ExportKeyPrivateAndPublic);
     if (whisperData.isEmpty()) {
         setError(QString("Failed to export whisper key: %1").arg(m_commandSet->lastError()));
-        // CRITICAL: Close drawer even on error (iOS)
-        m_channel->setState(Keycard::ChannelState::Idle);
+        operationCompleted();
         return keys;
     }
     qDebug() << "SessionManager: Whisper key data size:" << whisperData.size();
@@ -1026,8 +832,7 @@ SessionManager::LoginKeys SessionManager::exportLoginKeys()
     QByteArray encryptionData = m_commandSet->exportKey(true, false, PATH_ENCRYPTION, Keycard::APDU::P2ExportKeyPrivateAndPublic);
     if (encryptionData.isEmpty()) {
         setError(QString("Failed to export encryption key: %1").arg(m_commandSet->lastError()));
-        // CRITICAL: Close drawer even on error (iOS)
-        m_channel->setState(Keycard::ChannelState::Idle);
+        operationCompleted();
         return keys;
     }
     qDebug() << "SessionManager: Encryption key data size:" << encryptionData.size();
@@ -1071,8 +876,7 @@ SessionManager::RecoverKeys SessionManager::exportRecoverKeys()
     QByteArray eip1581Data = m_commandSet->exportKey(true, false, PATH_EIP1581);
     if (eip1581Data.isEmpty()) {
         setError(QString("Failed to export EIP1581 key: %1").arg(m_commandSet->lastError()));
-        // CRITICAL: Close drawer even on error (iOS)
-        m_channel->setState(Keycard::ChannelState::Idle);
+        operationCompleted();
         return keys;
     }
     keys.eip1581 = parseExportedKey(eip1581Data);
@@ -1086,8 +890,7 @@ SessionManager::RecoverKeys SessionManager::exportRecoverKeys()
     
     if (walletRootData.isEmpty()) {
         setError(QString("Failed to export wallet root key: %1").arg(m_commandSet->lastError()));
-        // CRITICAL: Close drawer even on error (iOS)
-        m_channel->setState(Keycard::ChannelState::Idle);
+        operationCompleted();
         return keys;
     }
     keys.walletRootKey = parseExportedKey(walletRootData);
@@ -1096,8 +899,7 @@ SessionManager::RecoverKeys SessionManager::exportRecoverKeys()
     QByteArray walletData = m_commandSet->exportKey(true, false, PATH_WALLET);
     if (walletData.isEmpty()) {
         setError(QString("Failed to export wallet key: %1").arg(m_commandSet->lastError()));
-        // CRITICAL: Close drawer even on error (iOS)
-        m_channel->setState(Keycard::ChannelState::Idle);
+        operationCompleted();
         return keys;
     }
     keys.walletKey = parseExportedKey(walletData);
@@ -1106,8 +908,7 @@ SessionManager::RecoverKeys SessionManager::exportRecoverKeys()
     QByteArray masterData = m_commandSet->exportKey(true, true, PATH_MASTER);
     if (masterData.isEmpty()) {
         setError(QString("Failed to export master key: %1").arg(m_commandSet->lastError()));
-        // CRITICAL: Close drawer even on error (iOS)
-        m_channel->setState(Keycard::ChannelState::Idle);
+        operationCompleted();
         return keys;
     }
     keys.masterKey = parseExportedKey(masterData);
@@ -1127,21 +928,27 @@ SessionManager::Metadata SessionManager::getMetadata()
     QMutexLocker locker(&m_operationMutex);
 
     Metadata metadata;
-    
-    if (m_state != SessionState::Ready && m_state != SessionState::Authorized) {
-        setError("Card not ready");
-        return metadata;
-    }
+
     
     if (!m_commandSet) {
         setError("No command set available");
         return metadata;
     }
     
-    // Get metadata from card (public data type)
-    // Use P1StoreDataPublic (0x00) to match what we used in storeData
+    // Get metadata from card (matching status-keycard-go GetMetadata)
     qDebug() << "SessionManager: Getting metadata from card";
-    QByteArray metadataData = m_commandSet->getData(Keycard::APDU::P1StoreDataPublic);  // 0x00 = P1StoreDataPublic
+    QByteArray metadataData = m_commandSet->getData(Keycard::APDU::P1StoreDataPublic);  // 0x00
+    
+    // Check if data looks like a status word (error response)
+    if (metadataData.size() == 2) {
+        uint16_t sw = (static_cast<uint8_t>(metadataData[0]) << 8) | static_cast<uint8_t>(metadataData[1]);
+        if (sw != 0x9000) {  // Not success
+            qDebug() << "SessionManager: Card returned status word:" << QString("0x%1").arg(sw, 4, 16, QChar('0'));
+            qDebug() << "SessionManager: No metadata on card (error or empty)";
+            operationCompleted();
+            return metadata;
+        }
+    }
     
     if (metadataData.isEmpty()) {
         // Not an error - card might not have metadata yet
@@ -1150,50 +957,78 @@ SessionManager::Metadata SessionManager::getMetadata()
         return metadata;
     }
     
-    // Parse metadata TLV format (matching Go implementation)
-    // Format: TLV with tag 0xA1 containing:
-    //   - 0x80: Name (optional)
-    //   - 0x81: Wallet paths array
+    // Parse metadata using Go's custom binary format (matching types/metadata.go ParseMetadata())
+    // Format: [version+namelen][name][start/count pairs in LEB128]
+    //   Byte 0: version (3 bits) + name length (5 bits)
+    //   Bytes 1..namelen: card name
+    //   Remaining: series of start/count LEB128 pairs for wallet paths
     
-    QByteArray template_ = findTlvTag(metadataData, 0xA1);
-    if (template_.isEmpty()) {
-        qWarning() << "Failed to find metadata template tag 0xA1";
+    int offset = 0;
+    if (offset >= metadataData.size()) {
+        qDebug() << "SessionManager: Metadata too short";
         operationCompleted();
         return metadata;
     }
     
-    // Parse name
-    QByteArray nameData = findTlvTag(template_, 0x80);
-    if (!nameData.isEmpty()) {
-        metadata.name = QString::fromUtf8(nameData);
+    // Parse header byte
+    uint8_t header = static_cast<uint8_t>(metadataData[offset++]);
+    uint8_t version = header >> 5;
+    uint8_t namelen = header & 0x1F;
+    
+    qDebug() << "SessionManager: Metadata version:" << version << "namelen:" << namelen;
+    
+    if (version != 1) {
+        qWarning() << "SessionManager: Invalid metadata version:" << version;
+        operationCompleted();
+        return metadata;
     }
     
-    // Parse wallet paths
-    QByteArray walletsData = findTlvTag(template_, 0x81);
-    if (!walletsData.isEmpty()) {
-        // Each wallet is 4 bytes (uint32 last component of path)
-        int offset = 0;
-        while (offset + 4 <= walletsData.size()) {
-            uint32_t pathComponent = (static_cast<uint32_t>(static_cast<uint8_t>(walletsData[offset])) << 24) |
-                                     (static_cast<uint32_t>(static_cast<uint8_t>(walletsData[offset + 1])) << 16) |
-                                     (static_cast<uint32_t>(static_cast<uint8_t>(walletsData[offset + 2])) << 8) |
-                                     (static_cast<uint32_t>(static_cast<uint8_t>(walletsData[offset + 3])));
-            
-            // Derive wallet at PATH_WALLET_ROOT / pathComponent
-            QString walletPath = PATH_WALLET_ROOT + QString("/%1").arg(pathComponent);
-            
-            // Export public key for this path
-            QByteArray keyData = m_commandSet->exportKey(true, false, walletPath);
-            if (!keyData.isEmpty()) {
-                KeyPair kp = parseExportedKey(keyData);
-                Wallet wallet;
-                wallet.path = walletPath;
-                wallet.address = kp.address;
-                wallet.publicKey = kp.publicKey;
-                metadata.wallets.append(wallet);
-            }
-            
-            offset += 4;
+    // Parse card name
+    if (namelen > 0) {
+        if (offset + namelen > metadataData.size()) {
+            qWarning() << "SessionManager: Metadata too short for name";
+            operationCompleted();
+            return metadata;
+        }
+        QByteArray nameData = metadataData.mid(offset, namelen);
+        metadata.name = QString::fromUtf8(nameData);
+        offset += namelen;
+        qDebug() << "SessionManager: Card name:" << metadata.name;
+    }
+    
+    // Parse wallet paths (LEB128 encoded start/count pairs)
+    while (offset < metadataData.size()) {
+        // Parse start index (LEB128)
+        uint32_t start = 0;
+        int shift = 0;
+        while (offset < metadataData.size()) {
+            uint8_t byte = static_cast<uint8_t>(metadataData[offset++]);
+            start |= (byte & 0x7F) << shift;
+            if ((byte & 0x80) == 0) break;
+            shift += 7;
+        }
+        
+        if (offset >= metadataData.size()) break;
+        
+        // Parse count (LEB128)
+        uint32_t count = 0;
+        shift = 0;
+        while (offset < metadataData.size()) {
+            uint8_t byte = static_cast<uint8_t>(metadataData[offset++]);
+            count |= (byte & 0x7F) << shift;
+            if ((byte & 0x80) == 0) break;
+            shift += 7;
+        }
+        
+        // Add all paths in range [start, start+count]
+        // Expand to full paths like Go's ToMetadata() does
+        for (uint32_t i = start; i <= start + count; ++i) {
+            QString walletPath = PATH_WALLET_ROOT + QString("/%1").arg(i);
+            Wallet wallet;
+            wallet.path = walletPath;
+            // Note: address and publicKey are left empty (not resolved)
+            // Use exportKey() separately if you need those
+            metadata.wallets.append(wallet);
         }
     }
     
@@ -1306,7 +1141,15 @@ bool SessionManager::storeMetadata(const QString& name, const QStringList& paths
 
         return false;
     }
-    
+
+    m_metadata.name = name;
+    for (const QString& path : paths) {
+        m_metadata.wallets.append({
+            .path = path,
+            .address = "",
+            .publicKey = ""
+        });
+    }
     operationCompleted();
 
     return true;

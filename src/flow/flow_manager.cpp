@@ -41,22 +41,6 @@ void FlowManager::destroyInstance()
 {
     QMutexLocker locker(&s_instanceMutex);
     if (s_instance) {
-        qDebug() << "FlowManager: Destroying singleton instance";
-        
-        // Cancel any running flow before destroying
-        // This ensures clean shutdown without race conditions
-        s_instance->cancelFlow();
-        
-        // Wait for async operations to complete
-        // Need longer wait to ensure QtConcurrent tasks finish
-        locker.unlock();
-        QThread::msleep(200);
-        
-        // Process Qt events to ensure deleteLater() executes
-        QCoreApplication::processEvents();
-        QThread::msleep(50);
-        
-        locker.relock();
         
         delete s_instance;
         s_instance = nullptr;
@@ -75,13 +59,9 @@ FlowManager::FlowManager(QObject* parent)
 }
 
 FlowManager::~FlowManager()
-{
-    qDebug() << "FlowManager: Destructor called";
-    
+{    
     // Cleanup any running flow
     cleanupFlow();
-    
-    qDebug() << "FlowManager: Destroyed";
 }
 
 bool FlowManager::init(std::shared_ptr<Keycard::CommandSet> commandSet)
@@ -93,7 +73,7 @@ bool FlowManager::init(std::shared_ptr<Keycard::CommandSet> commandSet)
         m_channel = m_commandSet->channel();
     }
 
-        // Connect NFC events
+    // Connect NFC events
     connect(m_channel.get(), &Keycard::KeycardChannel::targetDetected,
         this, &FlowManager::onCardDetected);
 
@@ -118,6 +98,13 @@ bool FlowManager::startFlow(int flowType, const QJsonObject& params)
     
     qDebug() << "FlowManager: Starting flow type:" << flowType << "params:" << params;
     
+    // Check if initialized
+    if (!m_commandSet || !m_channel) {
+        m_lastError = "FlowManager not initialized";
+        qWarning() << "FlowManager: Cannot start flow - not initialized";
+        return false;
+    }
+    
     // Check state
     if (m_stateMachine->state() != FlowState::Idle) {
         m_lastError = "Flow already running";
@@ -137,8 +124,6 @@ bool FlowManager::startFlow(int flowType, const QJsonObject& params)
         return false;
     }
     
-    qDebug() << "FlowManager: Flow created, connecting signals...";
-    
     // Connect flow signals
     connect(m_currentFlow, &FlowBase::flowPaused,
             this, &FlowManager::onFlowPaused);
@@ -148,9 +133,7 @@ bool FlowManager::startFlow(int flowType, const QJsonObject& params)
     
     connect(m_currentFlow, &FlowBase::flowError,
             this, &FlowManager::onFlowError);
-    
-    qDebug() << "FlowManager: Signals connected, transitioning to Running state...";
-    
+        
     // Transition to Running
     if (!m_stateMachine->transition(FlowState::Running)) {
         m_lastError = "Failed to transition to Running state";
@@ -158,14 +141,10 @@ bool FlowManager::startFlow(int flowType, const QJsonObject& params)
         return false;
     }
     
-    qDebug() << "FlowManager: State transitioned to Running";
-    
     locker.unlock();
     
-    qDebug() << "FlowManager: Running flow asynchronously...";
     runFlowAsync();
     
-    qDebug() << "FlowManager: Flow started successfully";
     return true;
 }
 
@@ -264,19 +243,13 @@ void FlowManager::onCardDetected(const QString& uid)
     
     // Debounce: Ignore if it's the same card we already know about
     if (m_currentCardUid == uid) {
-        qDebug() << "FlowManager: Same card, ignoring (debounce)";
+        qDebug() << "FlowManager: Same card, ignoring";
         return;  // Same card, already detected
     }
     
-    qDebug() << "FlowManager: NEW card detected:" << uid;
     m_currentCardUid = uid;  // Track this card
     
-    qDebug() << "FlowManager: m_waitingForCard =" << m_waitingForCard;
-    qDebug() << "FlowManager: m_currentFlow =" << (m_currentFlow ? "YES" : "NO");
-    qDebug() << "FlowManager: state =" << (int)m_stateMachine->state();
-    
     if (m_waitingForCard && m_currentFlow) {
-        qDebug() << "🚀 FlowManager: Card arrived while flow waiting - RESUMING FLOW!";
         m_waitingForCard = false;
         
         // Resume flow if paused
@@ -292,6 +265,11 @@ void FlowManager::onCardDetected(const QString& uid)
 void FlowManager::onCardRemoved()
 {
     qDebug() << "FlowManager: Card removed";
+
+#if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
+    qDebug() << "Ignoring card removals";
+    return;
+#else
     
     QMutexLocker locker(&m_mutex);
     
@@ -304,6 +282,7 @@ void FlowManager::onCardRemoved()
         
         m_currentFlow->pauseAndWait(FlowSignals::INSERT_CARD, "connection-error");
     }
+#endif
 }
 
 // ============================================================================
@@ -488,6 +467,12 @@ void FlowManager::cleanupFlow()
 {
     qDebug() << "FlowManager: Cleaning up flow";
     
+    // Interrupt any waiting operations by disconnecting channel
+    // This will cause waitForCard() to exit immediately
+    if (m_channel) {
+        m_channel->setState(Keycard::ChannelState::Idle);
+    }
+    
     // Wait for async flow execution to complete before cleaning up
     if (m_flowFuture.isValid() && !m_flowFuture.isFinished()) {
         qDebug() << "FlowManager: Waiting for async flow to finish...";
@@ -496,13 +481,6 @@ void FlowManager::cleanupFlow()
     }
     
     QMutexLocker locker(&m_mutex);
-    
-    // iOS: Close NFC drawer (flow complete)
-    // Android/PC/SC: No-op
-    if (m_channel) {
-        qDebug() << "FlowManager: Setting channel state to Idle (closing NFC drawer on iOS)";
-        m_channel->setState(Keycard::ChannelState::Idle);
-    }
     
     // iOS: Clear cached authentication state for security
     // Cached PIN should only persist within a single flow

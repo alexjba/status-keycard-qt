@@ -138,10 +138,6 @@ public:
 
 signals:
     void stateChanged(SessionState newState, SessionState oldState);
-    void cardDetected(const QString& uid);
-    void cardRemoved();
-    void readerConnected();
-    void readerDisconnected();
     void error(const QString& message);
 
 private slots:
@@ -149,12 +145,12 @@ private slots:
     void onCardDetected(const QString& uid);
     void onCardRemoved();
     void onChannelError(const QString& error);
-    void checkCardState();
 
 private:
     void setState(SessionState newState);
     void closeSecureChannel();  // Cleanup CommandSet and channel connection
     void setError(const QString& error);
+    void startCardOperation();
     void operationCompleted();
 
     // State
@@ -167,6 +163,7 @@ private:
     std::shared_ptr<Keycard::CommandSet> m_commandSet;
     Keycard::ApplicationInfo m_appInfo;
     Keycard::ApplicationStatus m_appStatus;  // Cached status to avoid redundant GET_STATUS calls
+    Metadata m_metadata;
     
     // Monitoring
     QTimer* m_stateCheckTimer;

@@ -83,8 +83,6 @@ QJsonObject StoreMetadataFlow::execute()
     // Sort path components (Go keeps them ordered)
     std::sort(pathComponents.begin(), pathComponents.end());
     
-    qDebug() << "StoreMetadataFlow: Wallet path components:" << pathComponents.size();
-    
     // Build metadata in Go's custom binary format (matching types/metadata.go Serialize())
     // Format: [version+namelen][name][start/count pairs in LEB128]
     // - Byte 0: 0x20 | namelen (version=1 in top 3 bits, name length in bottom 5 bits)
@@ -120,9 +118,6 @@ QJsonObject StoreMetadataFlow::execute()
         writeLEB128(metadata, start);
         writeLEB128(metadata, count);
     }
-    
-    qDebug() << "StoreMetadataFlow: Encoded metadata size:" << metadata.size() << "bytes";
-    qDebug() << "StoreMetadataFlow: Metadata hex:" << metadata.toHex();
     
     if (!verifyPIN()) {
         QJsonObject error;

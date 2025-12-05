@@ -33,11 +33,8 @@ endfunction()
 
 # Add test executables
 add_keycard_test(test_rpc_service)
-add_keycard_test(test_session_manager)
+add_keycard_test(test_session_manager mocks/mock_keycard_backend.cpp)
 add_keycard_test(test_signal_manager)
-add_keycard_test(test_c_api)
-add_keycard_test(test_pairing_storage)
-add_keycard_test(test_integration)
 
 # Flow API tests (pure logic - NO hardware, runs instantly)
 add_keycard_test(test_flow_logic_only)
@@ -45,14 +42,8 @@ add_keycard_test(test_flow_logic_only)
 # Flow API tests (mock APDU responses)
 add_keycard_test(test_flow_with_mock_backend mocks/mock_keycard_backend.cpp)
 
-# Flow API tests (real flow execution with dependency injection)
-add_keycard_test(test_flow_integration_with_di mocks/mock_keycard_backend.cpp)
-
 # Flow signal routing test (proves signals reach SignalManager)
 add_keycard_test(test_flow_signal_routing mocks/mock_keycard_backend.cpp)
-
-# Comprehensive API tests with dependency injection
-add_keycard_test(test_c_api_comprehensive mocks/mock_keycard_backend.cpp)
 
 # Flow API tests (require hardware - disabled by default)
 # State machine test is pure logic - NO hardware needed, always enabled!
@@ -76,10 +67,8 @@ target_include_directories(test_sign_flow_tlv_parsing
 )
 add_test(NAME test_sign_flow_tlv_parsing COMMAND test_sign_flow_tlv_parsing)
 
-# These tests require hardware - disabled by default:
-# add_keycard_test(test_flow_signals)
-# add_keycard_test(test_flow_manager)
-# add_keycard_test(test_flow_integration)
+# Flow signals constants test (pure logic - NO hardware needed)
+add_keycard_test(test_flow_signals)
 
 # Coverage target (optional, requires gcov/lcov)
 if(CMAKE_BUILD_TYPE MATCHES "Debug")

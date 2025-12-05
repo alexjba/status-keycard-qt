@@ -15,12 +15,10 @@ const QString LoginFlow::ENCRYPTION_PATH = "m/43'/60'/1581'/1'/0";
 LoginFlow::LoginFlow(FlowManager* manager, const QJsonObject& params, QObject* parent)
     : FlowBase(manager, FlowType::Login, params, parent)
 {
-    qDebug() << "LoginFlow: Created";
 }
 
 LoginFlow::~LoginFlow()
 {
-    qDebug() << "LoginFlow: Destroyed";
 }
 
 QJsonObject LoginFlow::execute()
@@ -81,9 +79,6 @@ QJsonObject LoginFlow::execute()
 
 QJsonObject LoginFlow::exportKey(const QString& path, bool includePrivate)
 {
-    qDebug() << "LoginFlow: Exporting key at path:" << path 
-             << "includePrivate:" << includePrivate;
-    
     // Check if cancelled
     if (isCancelled()) {
         qWarning() << "LoginFlow: Export cancelled";
@@ -111,8 +106,6 @@ QJsonObject LoginFlow::exportKey(const QString& path, bool includePrivate)
         return QJsonObject();
     }
     
-    qDebug() << "LoginFlow: Exported key, data size:" << keyData.size();
-    
     // Parse key data
     // Parse TLV-encoded key data
     QByteArray publicKey, privateKey;
@@ -130,13 +123,6 @@ QJsonObject LoginFlow::exportKey(const QString& path, bool includePrivate)
     } else if (includePrivate) {
         qCritical() << "LoginFlow: Private key requested but not found in exported data";
         return QJsonObject();
-    }
-    
-    qDebug() << "LoginFlow: Key exported successfully";
-    qDebug() << "  Public key:" << keyPair["publicKey"].toString().left(20) << "...";
-    qDebug() << "  Address:" << keyPair["address"].toString();
-    if (includePrivate) {
-        qDebug() << "  Private key:" << keyPair["privateKey"].toString().left(20) << "...";
     }
     
     return keyPair;

@@ -63,14 +63,8 @@ bool FlowStateMachine::canTransition(FlowState newState) const
 
 bool FlowStateMachine::transition(FlowState newState)
 {
-    qDebug() << "FlowStateMachine: transition() called, trying to acquire mutex...";
     QMutexLocker locker(&m_mutex);
-    qDebug() << "FlowStateMachine: mutex acquired";
-    
     FlowState oldState = m_state;
-    qDebug() << "FlowStateMachine: Current state:" << static_cast<int>(oldState)
-             << "Target state:" << static_cast<int>(newState);
-    
     // Check if transition is valid
     if (!canTransition(newState)) {
         qWarning() << "FlowStateMachine: Invalid transition:"
@@ -78,7 +72,6 @@ bool FlowStateMachine::transition(FlowState newState)
                    << static_cast<int>(newState);
         return false;
     }
-    qDebug() << "FlowStateMachine: Transition is valid";
     
     // Same state, nothing to do
     if (oldState == newState) {
@@ -92,12 +85,9 @@ bool FlowStateMachine::transition(FlowState newState)
              << static_cast<int>(oldState) << "->"
              << static_cast<int>(newState);
     
-    qDebug() << "FlowStateMachine: About to unlock mutex and emit signal...";
     // Emit signal (unlock mutex first to avoid deadlock)
     locker.unlock();
-    qDebug() << "FlowStateMachine: Mutex unlocked, emitting signal...";
     emit stateChanged(oldState, newState);
-    qDebug() << "FlowStateMachine: Signal emitted, returning true";
     
     return true;
 }
