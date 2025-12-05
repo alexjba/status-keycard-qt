@@ -12,6 +12,7 @@ set(CMAKE_AUTOUIC ON)
 option(BUILD_TESTING "Build unit tests" ON)
 option(BUILD_EXAMPLES "Build example applications" OFF)
 set(STATUS_KEYCARD_BUILD_TESTING ${BUILD_TESTING})  # Save status-keycard-qt test preference
+set(STATUS_KEYCARD_BUILD_EXAMPLES ${BUILD_EXAMPLES})  # Save status-keycard-qt examples preference
 set(STATUS_KEYCARD_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})  # Save status-keycard-qt library type preference
 
 # Find dependencies
@@ -73,6 +74,7 @@ FetchContent_MakeAvailable(keycard-qt)
 
 # Restore status-keycard-qt preferences
 set(BUILD_TESTING ${STATUS_KEYCARD_BUILD_TESTING} CACHE BOOL "Build status-keycard-qt tests" FORCE)
+set(BUILD_EXAMPLES ${STATUS_KEYCARD_BUILD_EXAMPLES} CACHE BOOL "Build status-keycard-qt examples" FORCE)
 set(BUILD_SHARED_LIBS ${STATUS_KEYCARD_BUILD_SHARED_LIBS} CACHE BOOL "Build status-keycard-qt as shared/static" FORCE)
 
 # Set KEYCARD_QT_DIR for compatibility

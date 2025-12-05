@@ -1,7 +1,8 @@
 #include <status-keycard-qt/status_keycard.h>
+#include <QCoreApplication>
+#include <QTimer>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 
 // Signal callback handler
 void on_signal(const char* signal_json) {
@@ -34,7 +35,10 @@ void call_rpc(const char* method, const char* params) {
     }
 }
 
-int main() {
+int main(int argc, char *argv[]) {
+    // Qt application is required for the event loop
+    QCoreApplication app(argc, argv);
+    
     printf("=== Status Keycard Qt - Simple Usage Example ===\n\n");
     printf("This example demonstrates the C API using JSON-RPC.\n\n");
     
@@ -60,34 +64,36 @@ int main() {
     printf("4. Getting status...\n");
     call_rpc("keycard.GetStatus", "{}");
     
-    // 5. Wait for signals
+    // 5. Wait for signals using Qt timer
     printf("5. Listening for keycard events...\n");
     printf("   Insert a keycard to see signals\n");
     printf("   Waiting 10 seconds...\n\n");
     
-    for (int i = 0; i < 10; i++) {
-        sleep(1);
-        printf(".");
-        fflush(stdout);
-    }
-    printf("\n\n");
+    // Use QTimer to exit after 10 seconds
+    QTimer::singleShot(10000, &app, [&]() {
+        printf("\n\n");
+        
+        // 6. Get final status
+        printf("6. Getting final status...\n");
+        call_rpc("keycard.GetStatus", "{}");
+        
+        // 7. Stop service
+        printf("7. Stopping service...\n");
+        call_rpc("keycard.Stop", "{}");
+        
+        // 8. Cleanup
+        printf("8. Cleaning up...\n");
+        ResetAPI();
+        printf("   ✅ Done\n\n");
+        
+        printf("=== Example Complete ===\n");
+        printf("\nNote: To see more activity, insert a physical keycard during the wait.\n");
+        printf("The service will detect the card and emit signals.\n\n");
+        
+        // Exit the application
+        app.quit();
+    });
     
-    // 6. Get final status
-    printf("6. Getting final status...\n");
-    call_rpc("keycard.GetStatus", "{}");
-    
-    // 7. Stop service
-    printf("7. Stopping service...\n");
-    call_rpc("keycard.Stop", "{}");
-    
-    // 8. Cleanup
-    printf("8. Cleaning up...\n");
-    ResetAPI();
-    printf("   ✅ Done\n\n");
-    
-    printf("=== Example Complete ===\n");
-    printf("\nNote: To see more activity, insert a physical keycard during step 5.\n");
-    printf("The service will detect the card and emit signals.\n\n");
-    
-    return 0;
+    // Run Qt event loop
+    return app.exec();
 }
